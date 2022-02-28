@@ -52,9 +52,9 @@ Performance
 ===========
 
 TSCrunch is designed for ultra-fast decrunching while keeping a decent compression ratio. Being a byte-cruncher, it falls short of popular bit-crunchers, such as exomizer or B2, when comparing compression efficiency, but it is usually much faster at decoding. Furthermore, you can expect a 20% to 40% speed bump compared to popular byte-crunchers with similar compression efficiency.
-The following benchmark compares TSCrunch performance with those of a fast byte-cruncher, TinyCrunch, and a fast bit-cruncher, B2, on a real-case mem-compression scenario: Chopper Command, from the same author.
+The following benchmark compares TSCrunch performance with those of a fast byte-cruncher, TinyCrunch, and two fast bit-crunchers, B2 and Dali, on a real-case mem-compression scenario: Chopper Command, from the same author.
 
-![image](https://user-images.githubusercontent.com/52791690/155893184-16ccf033-c6a2-4616-b9e3-ebe87048f6b2.png)
+![image](https://user-images.githubusercontent.com/52791690/156011669-8ced22e5-2f19-42b7-9610-7dfb911644a0.png)
 
 
 Future development
