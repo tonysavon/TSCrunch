@@ -58,8 +58,8 @@ The following benchmark compares TSCrunch performance with those of a fast byte-
 
 Chopper Command - Raw encoding	 - game prg		
 			
-				Tscrunch 1.0	TinyCrunch 1.2	B2
-Size			46913			46913			46913
+		Tscrunch 1.0		TinyCrunch 1.2		B2
+Size		46913			46913			46913
 Crunched size	13321			15419			11181
 % of original	28.40%			32.87%			23.83%
 Decrunch cycles	799826			1133039			1694585
@@ -68,8 +68,8 @@ Cycles per byte	17.0491335		24.15191951		36.12186388
 			
 Frostbite - Raw encoding - game prg			
 			
-				Tscrunch 1.0	TinyCrunch 1.2	B2
-Size			61185			61185			61185
+		Tscrunch 1.0		TinyCrunch 1.2		B2
+Size		61185			61185			61185
 Crunched size	21329			22931			17759
 % of original	34.86%			37.48%			29.03%
 Decrunch cycles	1176826			1507239			2475450
