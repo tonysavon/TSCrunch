@@ -2,7 +2,7 @@
 
 decrunch.asm
 
-NMOS 6502 decompressor for data stored in tscrunch format.
+NMOS 6502 decompressor for data stored in TSCrunch format.
 
 This code is written for the KickAssembler assembler.
 
@@ -10,9 +10,13 @@ Copyright Antonio Savona 2022.
 
 */
 
+#define FASTDECRUNCHER // 1.5% faster, at the cost of 8 bytes of code
+//#define INPLACE //Enables inplace decrunching. Use -i switch when crunching. 
+
+
 .label tsget 	= $f8	//2 bytes
-.label tsput 	= $fa	//2 bytes
-.label tstemp	= $fc	
+.label tstemp	= $fa
+.label tsput 	= $fb	//2 bytes
 .label lzput 	= $fd	//2 bytes
 
 
@@ -22,7 +26,18 @@ Copyright Antonio Savona 2022.
 	#define USELZ2
 #endif
 
-#define FASTDECRUNCHER // 1.5% faster, at the cost of 8 bytes of code
+#if INPLACE
+
+.macro TS_DECRUNCH(src)
+{
+		lda #<src
+		sta.zp tsget
+		lda #>src
+		sta.zp tsget + 1
+		jsr tsdecrunch
+}
+
+#else
 
 .macro TS_DECRUNCH(src,dst)
 {
@@ -37,10 +52,29 @@ Copyright Antonio Savona 2022.
 		jsr tsdecrunch
 }
 
+#endif
+
+
 tsdecrunch:
 {
 	decrunch:
+
+	#if INPLACE
+			ldy #$ff
+		!:	iny
+			lda (tsget),y
+			sta tsput , y	//last iteration trashes lzput, with no effect.
+			cpy #2
+			bne !- 
+			
+			pha
+			tya
 			ldy #0
+			beq update_getonly
+	#else
+			ldy #0			
+	#endif
+
 	entry2:		
 			lax (tsget),y
 			
@@ -51,6 +85,23 @@ tsdecrunch:
 			cmp #$40
 			bcs lz2	
 	#endif
+	
+	
+	#if INPLACE
+
+			inc tsget
+			bne !+
+			inc tsget + 1	
+		!:	lda (tsget),y
+			sta (tsput),y
+			iny
+			dex
+			bne !-	
+			tya
+			tax
+			//carry is clear
+			ldy #0
+	#else
 			tay
 		!:
 			lda (tsget),y
@@ -59,9 +110,8 @@ tsdecrunch:
 			bne !-
 			
 			txa
-	
 			inx
-	
+	#endif
 			
 	updatezp_noclc:
 			adc tsput
@@ -69,18 +119,17 @@ tsdecrunch:
 			bcs updateput_hi
 		putnoof:
 			txa
+		update_getonly:
 			adc tsget
 			sta tsget
 			bcc entry2
 			inc tsget+1
 			bcs entry2
-	
 			
 	updateput_hi:
 			inc tsput+1
 			clc
 			bcc putnoof
-	
 								
 	rleorlz:
 	#if USELZ
@@ -112,6 +161,10 @@ tsdecrunch:
 			bcc updatezp_noclc
 			
 	   done:
+#if INPLACE	   
+	   		pla
+	   		sta (tsput),y
+#endif	   		
 			rts	
 	//LZ2	
 	#if USELZ2	
@@ -123,8 +176,7 @@ tsdecrunch:
 			sbc #0
 			sta lzput + 1 		
 	
-			//y already zero
-			
+			//y already zero			
 			lda (lzput),y
 			sta (tsput),y
 			iny		
@@ -184,7 +236,7 @@ tsdecrunch:
 			ldy #0
 			//clc not needed as we have len - 1 in A (from the encoder) and C = 1
 			bcs updatezp_noclc
-				
+
 	long:			
 			sec 
 			sbc (tsget),y
