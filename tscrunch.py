@@ -1,15 +1,12 @@
 #!/usr/bin/env python
 import sys
-from scipy.sparse.csgraph import dijkstra
-from scipy.sparse import csr_matrix
-
 
 RLEONLY			=	False
 REVERSELITERAL	=	False
 VERBOSE			=	True
 PRG				=	False
 SFX 			=	False
-OPTIMAL 		=	True
+INPLACE			=	False
 
 DEBUG = False
 
@@ -31,8 +28,8 @@ RLEID 			= 	1
 LITERALID 		= 	0
 
 
-
-
+from scipy.sparse.csgraph import dijkstra
+from scipy.sparse import csr_matrix
 
 
 boot = [
@@ -79,22 +76,18 @@ def findall(data,prefix,i,minlz = MINLZ):
 			yield f
 			x1 = f + minlz - 1
 	
+#pretty prints a progress bar	
+def progress(description,current,total):
+	percentage = 100 *current // total
+	tchars = 16 * current // total
+	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))
+	
+	
+class Token:
+	def __init__(self,src = None):
+		self.type = None
 
-def getPayloadFromToken(src,t):
-	if t[0] == RLEID:
-		rle = RLE(src,0,token = t)
-		return rle.getPayload()
-	elif t[0] == LZID:
-		lz = LZ(src,0,token = t)
-		return lz.getPayload()
-	elif t[0] == LZ2ID:
-		lz2 = LZ2(src,0,token = t)
-		return lz2.getPayload()
-	else:
-		lit = LIT(src,0,token = t)
-		return lit.getPayload()
-
-class RLE:
+class RLE(Token):
 	def __init__(self,src,i,size = None, token = None):
 		self.type = RLEID
 		self.rleByte = src[i]
@@ -110,20 +103,14 @@ class RLE:
 		else:
 			self.size = size
 	
-	def fromToken(self,token):
-		self.type, self.size, self.rleByte = token[:3]
-	
-	def getToken(self):
-		return (self.type,self.size, self.rleByte, self.getCost())
-			
 	def getCost(self):
 		return 2 + 0.00128 - 0.00001 * self.size
 
 	def getPayload(self):
 		return [RLEMASK | ((self.size & 0x7f) if RLEONLY else (self.size << 1) & 0x7f ), self.rleByte]
 	
-
-class LZ:
+	
+class LZ(Token):
 	def __init__(self,src,i, size = None, offset = None, minlz = MINLZ, token = None):
 		self.type = LZID
 	
@@ -150,21 +137,15 @@ class LZ:
 			self.size = size
 		if offset != None:
 			self.offset = offset
-		
-	def fromToken(self,token):
-		self.type, self.size, self.offset = token[:3]
 	
-	def getToken(self):
-		return (self.type,self.size, self.offset, self.getCost())
-		
 	def getCost(self):
-		return 2 + 0.00132 - 0.00001 * self.size
+		return 2 + 0.00134 - 0.00001 * self.size
 		
 	def getPayload(self):
 		return [LZMASK | (((self.size - 1)<< 2) & 0x7f) | (2 if self.offset < 256 else 0) , (self.offset & 0xff) ]
 
 
-class LZ2:
+class LZ2(Token):
 	def __init__(self,src,i, offset = None, token = None):
 		self.type = LZ2ID
 		self.size = 2
@@ -186,19 +167,15 @@ class LZ2:
 		else:
 			self.offset = offset
 		
-	def fromToken(self,token):
-		self.type, _ , self.offset = token[:3]
-	
-	def getToken(self):
-		return (self.type, self.size, self.offset, self.getCost())
-		
+
 	def getCost(self):
 		return 1 + 0.00132 - 0.00001 * self.size
 		
 	def getPayload(self):
 		return [LZ2MASK | (self.offset ) ]
-		
-class LIT:
+	
+	
+class LIT(Token):
 	def __init__(self,src,i, token = None):
 		self.type = LITERALID	
 		self.size = 1
@@ -206,27 +183,24 @@ class LIT:
 
 		if token != None:
 			self.fromToken(token)
-	
-	def fromToken(self,token):
-		self.type, self.size, self.start = token[:3]
-	
-	def getToken(self):
-		return (self.type,self.size, self.start, self.getCost())
-			
+
 	def getCost(self):
 		return self.size + 1 + 0.00130 - 0.00001 * self.size
 
 	def getPayload(self):
-		return bytes([LITERALMASK | (self.size if RLEONLY else (self.size))]) + src[self.start : self.start + self.size]
-		
+		return bytes([LITERALMASK | self.size]) + src[self.start : self.start + self.size]
+	
+	
 class Cruncher:
+
 	def __init__(self, src = None):
 
 		self.crunched = []
+		self.token_list = []
 		self.src = src
-		
 		self.graph = dict()
-	
+		self.crunchedSize = 0
+
 	def get_path(self,p):
 		
 		i = len(p) - 1
@@ -238,150 +212,146 @@ class Cruncher:
 	
 		return list(zip(path[::],path[1::]))
 	
-	#Greedy, sub-optimal crunching. Not much faster than optimal one: there's no reason to use it!		
-	def crunch(self, src = None):
-		if src != None:
-			self.src = src
-				
-		i = 0
-		lastliteral = None
-		while i < len(self.src):
-		
-			rle = RLE(self.src,i)
-			lz = LZ(self.src,i,1) #start with a dummy LZ
-			lz2 = LZ2(self.src,i,-1) #and a dummy lz2
-			mlz = MINLZ
-			if (not RLEONLY) and rle.size < LONGESTLZ - 1 :
-				mlz = max(MINLZ, rle.size + 1)
-				lz = LZ(self.src,i , minlz = mlz)
-			if (not RLEONLY) and lz.size < 2 and rle.size < 2 and i < len(self.src) - 2:
-				lz2 = LZ2(self.src,i)
-						
-			if (not RLEONLY) and lz.size >= mlz and lz2.offset < lz.size: 		
-				self.crunched.extend(lz.getPayload())
-				lastliteral = None
-				i += lz.size
-			
-			elif (not RLEONLY) and lz2.offset != -1:
-				lastliteral = None
-				self.crunched.extend(lz2.getPayload())
-				i += lz2.size
-				
-			elif rle.size >= MINRLE:
+	def prepend(self, data):
+		self.crunched = bytes(data) + bytes(self.crunched)
 	
-				self.crunched.extend(rle.getPayload())
-				lastliteral = None
-				i += rle.size
-			else:
-				if lastliteral == None or (len(self.crunched) - lastliteral + 1 ) == LONGESTLITERAL:
-					lastliteral = len(self.crunched)
-					self.crunched.extend([LITERALMASK | 0x01, self.src[i]])
-				else:
-					self.crunched[lastliteral] = (self.crunched[lastliteral] + 1) | LITERALMASK
-					self.crunched.extend([self.src[i]])
-				i += 1
-		self.crunched.append(0)
-
-	
-	def ocrunch(self, src = None):
-		if src != None:
-			self.src = src
+	def ocrunch(self):
 		
 		starts = set()
 		ends = set()
-		
-		if VERBOSE: 
-			print("populating LZ layer")
-			
 
-		for i in range(0,len(self.src)):
+		if INPLACE:	
+			remainder = self.src[-1:]
+			src = bytes(self.src[:-1])
+		else:
+			src = bytes(self.src)
+		
+		progress_string = "Populating LZ layer\t"
+		
+		for i in range(0,len(src)):	
+			if VERBOSE and ((i & 255) == 0):
+				progress(progress_string,i,len(src))
 			lz2 = None
-			rle = RLE(self.src,i)
-			#don't comput prefix for same bytes or this will explode
+			rle = RLE(src,i)
+			#don't compute prefix for same bytes or this will explode
 			#start computing for prefixes larger than RLE
 			if rle.size < LONGESTLZ - 1:	
-				lz = LZ(self.src,i, minlz = rle.size + 1)
+				lz = LZ(src,i, minlz = rle.size + 1)
 			else:
-				lz = LZ(self.src,i,1) #start with a dummy LZ
-				
+				lz = LZ(src,i,1) #start with a dummy LZ
+
 			if lz.size >= MINLZ or rle.size >= MINRLE:
 				starts.add(i)
-				
 			while lz.size >= MINLZ and lz.size > rle.size:
 				ends.add(i+lz.size)
-				self.graph[(i,i+lz.size)] = lz.getToken()
-				lz = LZ(self.src, i, lz.size - 1, lz.offset)
-				
+				self.graph[(i,i+lz.size)] = lz
+				lz = LZ(src, i, lz.size - 1, lz.offset)
 			while rle.size >= MINRLE:
 				ends.add(i+rle.size)
-				self.graph[(i,i+rle.size)] = rle.getToken()
-				rle = RLE(self.src, i, rle.size - 1)
-			
-			if (not RLEONLY) and len(self.src) - i > 2:
-				lz2 = LZ2(self.src,i)
+				self.graph[(i,i+rle.size)] = rle
+				rle = RLE(src, i, rle.size - 1)
+	
+			if (not RLEONLY) and len(src) - i > 2:
+				lz2 = LZ2(src,i)
 				if lz2.offset > 0:
-					self.graph[(i,i+2)] = lz2.getToken()
+					self.graph[(i,i+2)] = lz2
 					starts.add(i)
 					ends.add(i + 2)
 		
-		
-		starts.add(len(self.src))
+		if VERBOSE:
+			progress(progress_string,1,1)
+			sys.stdout.write('\n')
+			
+		starts.add(len(src))
 		starts = sorted(list(starts))
 		ends = [0] + sorted(list(ends))	
 
-		if VERBOSE:
-			print ("closing gaps")
+		progress_string = "Closing gaps\t\t"
 
 		e,s = 0,0
 		while e < len(ends) and s < len(starts):
+			if VERBOSE and ((s & 255) == 0):
+				progress(progress_string,s,len(starts))
 			end = ends[e]
 			if end < starts[s]:
-				#bridge
-				
+				#bridge		
 				while starts[s] - end >= LONGESTLITERAL:
 					key = (end,end + LONGESTLITERAL)
 					if not key in self.graph:
-						lit = LIT(self.src,end)
+						lit = LIT(src,end)
 						lit.size = LONGESTLITERAL
-						self.graph[key] = lit.getToken()
+						self.graph[key] = lit
 					end += LONGESTLITERAL
-				
 				s0 = s
 				while s0 < len(starts) and starts[s0] - end < LONGESTLITERAL:
 					key = (end,starts[s0])
 					if not key in self.graph:
-						lit = LIT(self.src,end)
-						lit.size = starts[s0]-end
-						self.graph[key] = lit.getToken()
+						lit = LIT(src,end)
+						lit.size = starts[s0] - end
+						self.graph[key] = lit
 					s0 += 1
-					
 				e+=1
 			else:
 				s+=1
 	
 		if VERBOSE:
-			print ("populating graph")
+			progress(progress_string,1,1)
+			sys.stdout.write('\n')
+	
+		progress_string = "Populating graph\t"
 
-		weights = tuple(v[3] for v in self.graph.values())
+		if VERBOSE:
+			progress(progress_string,0,3)
+		weights = tuple(v.getCost() for v in self.graph.values())
+		if VERBOSE:
+			progress(progress_string,1,3)
 		sources = tuple(s for s, _ in self.graph.keys())
+		if VERBOSE:
+			progress(progress_string,2,3)
 		targets = tuple(t for _, t in self.graph.keys())
-		n = len(self.src) + 1
+		n = len(src) + 1
 		dgraph = csr_matrix((weights, (sources, targets)), shape=(n, n))
 		if VERBOSE:
-			print ("computing shortest path")
+			progress(progress_string,1,1)
+			sys.stdout.write('\ncomputing shortest path\n')		
 		d,p = dijkstra(dgraph,indices = 0,return_predecessors = True)
 		for key in self.get_path(p):
-			self.crunched.extend(getPayloadFromToken(self.src, self.graph[key]))
+			#print (key)
+			self.token_list.append(self.graph[key])
 
-		self.crunched.append(0)
+		if INPLACE:
+			safety = len(self.token_list)
+			segment_uncrunched_size = 0
+			segment_crunched_size = 0
+			total_uncrunched_size = 0
+			for i in range(len(self.token_list)-1,-1,-1):
+				segment_crunched_size += len(self.token_list[i].getPayload()) #token size
+				segment_uncrunched_size += self.token_list[i].size #decrunched token raw size
+				if segment_uncrunched_size <= segment_crunched_size + 0:
+					safety = i
+					total_uncrunched_size += segment_uncrunched_size
+					segment_uncrunched_size = 0
+					segment_crunched_size = 0
+			
+			for token in (self.token_list[:safety]):
+				self.crunched.extend(token.getPayload())
+			if total_uncrunched_size > 0:
+				remainder = src[-total_uncrunched_size:] + remainder
+			self.crunched.extend(bytes([0]) + remainder[1:])
+			self.crunched = addr + remainder[:1] + bytes(self.crunched)
+			
+		else:
+			for token in (self.token_list):
+				self.crunched.extend(token.getPayload())	
+			self.crunched = bytes(self.crunched + [0])
+		self.crunchedSize = len(self.crunched)	
 
 class Decruncher:
 	def __init__(self, src = None):
 
 		self.src = src
 		self.decrunch()
-		
-		
+				
 	def decrunch(self, src = None):
 		
 		if src != None:
@@ -393,8 +363,9 @@ class Decruncher:
 			nlz2 = 0; nlz = 0; nrle = 0; nlit = 0; 
 			
 			self.decrunched = bytearray([])
-			i = 0
+			i=0
 			while self.src[i] != 0:
+				
 				code = self.src[i]
 				if (RLEONLY and code & 0x80 == LITERALMASK) or ((not RLEONLY) and (code & 0xC0 == LITERALMASK)) :
 										
@@ -412,10 +383,9 @@ class Decruncher:
 					run = 2
 					offset =   code & 0x3f 
 					p = len(self.decrunched)
-					
 					for l in range(run):
 						self.decrunched.append(self.decrunched[p-offset + l])
-					i += 1	
+					i += 1
 					nlz2 += 1	
 					
 				elif RLEONLY or (not RLEONLY and (code & 0x81) == RLEMASK):
@@ -429,31 +399,29 @@ class Decruncher:
 					offset = self.src[i+1] + (256 if code & 2 == 0 else 0)
 					p = len(self.decrunched)
 					for l in range(run):
-						
 						self.decrunched.append(self.decrunched[p-offset + l])			
-						
 					i += 2
 					nlz +=1
+			
+			
 			tot = sum((nlz,nlz2,nrle,nlit))
-			print ("lz: %d, lz2: %d, rle: %d, lit: %d tot: %d" % (nlz,nlz2,nrle,nlit,tot))
+			sys.stdout.write ("lz: %d, lz2: %d, rle: %d, lit: %d tot: %d\n" % (nlz,nlz2,nrle,nlit,tot))
 	
 def usage():
-	print ("tscrunch binary cruncher, by A. Savona")
-	print ("usage: tscrunch [-r] [-p] [-x] [-o] infile outfile")
+	print ("TSCrunch binary cruncher, by Antonio Savona")
+	print ("Usage: tscrunch [-p] [-i] [-r] [-q] [-x] infile outfile")
 	print (" -p  : input file is a prg, first 2 bytes are discarded.")
-	print (" -r  : switch to RLE mode for maximum decrunching speed but minimal compression")
-	print (" -s  : quick, sub-optimal compression")
-	print (" -q  : quiet mode")
 	print (" -x  $addr: creates a self extracting file (forces -p)")
-
-
+	print (" -i  : inplace crunching (forces -p)")
+	print (" -r  : switch to RLE mode for maximum decrunching speed but minimal compression")
+	print (" -q  : quiet mode")
+	
 
 if __name__ == "__main__":
 
 	if "-h" in sys.argv or len(sys.argv) < 3:
 		usage()
 	else:
-
 
 		if "-r" in sys.argv:
 			RLEONLY = True
@@ -465,39 +433,46 @@ if __name__ == "__main__":
 		if "-q" in sys.argv:
 			VERBOSE = False
 
-		if "-s" in sys.argv:
-			OPTIMAL = False
-			RLEONLY = False
-
 		if "-x" in sys.argv:
 			SFX = True
+			PRG = True
 			jmp_str = sys.argv[sys.argv.index("-x") + 1].strip("$")
 			jmp = int(jmp_str,base = 16)
 		
+		if "-i" in sys.argv:
+			INPLACE = True
+			PRG = True
+		
+		if "-p" in sys.argv:
+			PRG = True
 		
 		if SFX and RLEONLY:
-			print ("Can't create sfx prg in RLE only mode")
+			sys.stderr.write ("Can't create an sfx prg in RLE only mode\n")
 			exit(-1)
 		
+		if SFX and INPLACE:
+			sys.stderr.write ("Can't create an sfx prg with inplace crunching\n")
+			exit(-1)
 
+		if RLEONLY and INPLACE:
+			sys.stderr.write ("Can't create an rle-only prg with inplace crunching\n")
+			exit(-1)
+			
 		fr = open(sys.argv[-2],"rb")
 		src = load_raw(fr)
 
 		sourceLen = len(src)
-
-		if "-p" in sys.argv or SFX:
+		
+		decrunchTo = 0
+		loadTo = 0
+		
+		if PRG:
 			addr = src[:2]
-			src = src[2:]
-		
+			src = src[2:]		
 			decrunchTo = addr[0] + 256 * addr[1]
-			
+
 		cruncher = Cruncher(src)
-		
-		if OPTIMAL:
-			cruncher.ocrunch()
-		else:
-			cruncher.crunch()
-		
+		cruncher.ocrunch()
 		
 		if SFX:
 			
@@ -505,7 +480,6 @@ if __name__ == "__main__":
 			startAddress = 0x10000 - len(cruncher.crunched)
 			transfAddress =  fileLen + 0x6ff
 		
-			
 			boot[0x1e] = transfAddress & 0xff #transfer from
 			boot[0x1f] = transfAddress >> 8
 			
@@ -518,23 +492,30 @@ if __name__ == "__main__":
 			boot[0x78] = jmp & 0xff; # Jump to..
 			boot[0x79] = jmp >> 8;   #
 			
-			cruncher.crunched = boot + cruncher.crunched	
+			cruncher.prepend(boot)
+
+			loadTo = 0x0801
+			
+		decrunchEnd = decrunchTo + len(src) - 1
 		
-		
+		if INPLACE:
+			loadTo = decrunchEnd - len(cruncher.crunched) + 1
+			cruncher.prepend([loadTo & 255, loadTo >> 8])
+			
 		fo = open(sys.argv[-1],"wb")
 
-		
 		save_raw(fo,cruncher.crunched)
 		fo.close()
-
+		
 		if VERBOSE:
-			ratio = (float(len(cruncher.crunched)) * 100.0 / sourceLen)
-			print ("input file : %s, %d bytes" %(sys.argv[-2], sourceLen))
-			print ("output file: %s, %d bytes" %(sys.argv[-1], len(cruncher.crunched)))
+			ratio = (float(cruncher.crunchedSize) * 100.0 / sourceLen)
+			print ("input file  %s: %s, $%04x - $%04x : %d bytes" 
+			  %("PRG" if PRG else "RAW", sys.argv[-2], decrunchTo, decrunchEnd, sourceLen))
+			print ("output file %s: %s, $%04x - $%04x : %d bytes" 
+			  %("PRG" if SFX or INPLACE else "RAW", sys.argv[-1],  loadTo, cruncher.crunchedSize + loadTo - 1, cruncher.crunchedSize))
 			print ("crunched to %.2f%% of original size" %ratio)
 			
-		if DEBUG:
-			
+		if DEBUG and not (SFX or INPLACE or RLEONLY):
 			decruncher = Decruncher(cruncher.crunched)
 		
 			fo = open("test.raw","wb")
