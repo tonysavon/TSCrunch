@@ -10,21 +10,14 @@ Copyright Antonio Savona 2022.
 
 */
 
-#define FASTDECRUNCHER // 1.5% faster, at the cost of 8 bytes of code
+#define FASTDECRUNCHER // 1.5% faster, at the cost of 8 bytes of code. I'll have it!
 //#define INPLACE //Enables inplace decrunching. Use -i switch when crunching. 
-
 
 .label tsget 	= $f8	//2 bytes
 .label tstemp	= $fa
 .label tsput 	= $fb	//2 bytes
 .label lzput 	= $fd	//2 bytes
 
-
-#if RLEONLY
-#else
-	#define USELZ
-	#define USELZ2
-#endif
 
 #if INPLACE
 
@@ -81,7 +74,8 @@ tsdecrunch:
 			bmi rleorlz
 			beq done
 	literal:
-	#if USELZ2
+	#if RLEONLY
+	#else
 			cmp #$40
 			bcs lz2	
 	#endif
@@ -132,23 +126,23 @@ tsdecrunch:
 			bcc putnoof
 								
 	rleorlz:
-	#if USELZ
-			ldx #2
+	
+	#if RLEONLY
+			anc #$7f
+	#else	
 			alr #$7f
 			bcs ts_delz		
-	//RLE
-	#else
-			anc #$7f		//also clears carry
 	#endif
 			sta tstemp		//number of bytes to de-rle
 			iny
 			lda (tsget),y	//fetch rle byte
 			ldy tstemp
+			
 	#if FASTDECRUNCHER
-
 			dey
 			sta (tsput),y
 	#endif
+	
 	ts_derle_loop:
 			dey
 			sta (tsput),y
@@ -156,7 +150,8 @@ tsdecrunch:
 
 			//update zero page with a = runlen, x = 2 , y = 0 
 			lda tstemp
-
+			
+			ldx #2
 			//clc not needed as coming from anc
 			bcc updatezp_noclc
 			
@@ -167,13 +162,14 @@ tsdecrunch:
 #endif	   		
 			rts	
 	//LZ2	
-	#if USELZ2	
+	#if RLEONLY
+	#else	
 		lz2:
 			eor #$ff - $40
 			adc tsput
 			sta lzput
 			lda tsput + 1
-			sbc #0
+			sbc #$00
 			sta lzput + 1 		
 	
 			//y already zero			
@@ -182,15 +178,12 @@ tsdecrunch:
 			iny		
 			lda (lzput),y
 			sta (tsput),y
-
+					
 			tya //y = a = 1. 
 			tax //y = a = x = 1. a + carry = 2
 			dey //ldy #0
 			beq updatezp_noclc
-				
-	 #endif
-	 				
-#if USELZ
+
 	//LZ
 	ts_delz:
 			
@@ -200,21 +193,20 @@ tsdecrunch:
 			iny
 			
 			lda tsput
-
 			bcc long
+			
 			sbc (tsget),y
 			sta lzput
 			lda tsput+1
 	
 			sbc #$00
 		
-			//lz MUST decrunch forward
-	lz_entry:		
+			//lz MUST decrunch forward	
 			sta lzput+1
 	
-			dey //ldy #0
+			ldx #2
 	lz_put:
-	
+			ldy #0
 	#if FASTDECRUNCHER
 			lda (lzput),y
 			sta (tsput),y
@@ -235,15 +227,22 @@ tsdecrunch:
 			//update zero page with a = runlen, x = 2, y = 0
 			ldy #0
 			//clc not needed as we have len - 1 in A (from the encoder) and C = 1
+			
 			bcs updatezp_noclc
-
-	long:			
-			sec 
-			sbc (tsget),y
+	long:
+			//carry is clear and compensated for from the encoder
+			adc (tsget),y
 			sta lzput
-			lda tsput+1
-			sbc #$01
-			bcs lz_entry
+			iny
+			lax (tsget),y
+			ora #$80
+			adc tsput + 1
+			sta lzput + 1		
+			cpx #$80
+			rol lzto + 1
+			ldx #3
+	
+			bne lz_put
 
-#endif	
+	#endif	
 }

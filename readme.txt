@@ -1,4 +1,4 @@
-TSCrunch V1.1
+TSCrunch V1.2
 
 by Antonio Savona
 
@@ -104,3 +104,19 @@ Future development
 
 -Block-loading management for integration in disk loaders.
 -Speed up crunching, possibly rewriting the code C.
+
+
+Changelog
+=========
+
+1.2
+-Added long matches to improve compression with no effect on decrunching speed
+-Fixed bug in LZ2 search that would prevent some short matches from being identified 
+-Code is available also in Go to improve crunching speed and increase portability
+
+1.1
+-Added Inplace compression
+-Minor speed improvement 
+
+1.0
+-Initial release

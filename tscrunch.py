@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+
+"""
+TSCrunch binary cruncher, by Antonio Savona
+"""
+
 import sys
 
 RLEONLY			=	False
@@ -11,11 +16,12 @@ INPLACE			=	False
 DEBUG = False
 
 LONGESTRLE		=	127 if RLEONLY else 63
-LONGESTLZ		=	32
+LONGESTLONGLZ	=	64 
+LONGESTLZ 		=	32
 LONGESTLITERAL	=	127 if RLEONLY else 63
 MINRLE			=	2
 MINLZ			=	3
-LZOFFSET		=	511
+LZOFFSET		=	32767 #511
 
 RLEMASK 		= 	0x80
 LZMASK			= 	0x81
@@ -35,23 +41,24 @@ from scipy.sparse import csr_matrix
 boot = [
 
 	0x01, 0x08, 0x0B, 0x08, 0x0A, 0x00, 0x9E, 0x32, 0x30, 0x36, 0x31, 0x00,
-	0x00, 0x00, 0x78, 0xA2, 0xB3, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
+	0x00, 0x00, 0x78, 0xA2, 0xC0, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
 	0xF8, 0x4C, 0x02, 0x00, 0x34, 0xBD, 0x00, 0x10, 0x9D, 0x00, 0xFF, 0xE8,
 	0xD0, 0xF7, 0xC6, 0x04, 0xC6, 0x07, 0xA5, 0x04, 0xC9, 0x07, 0xB0, 0xED,
 	0xA0, 0x00, 0xB3, 0x23, 0x30, 0x23, 0xF0, 0x3A, 0xC9, 0x40, 0xB0, 0x3E,
 	0xA8, 0xB9, 0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8,
-	0x65, 0x27, 0x85, 0x27, 0xB0, 0x71, 0x8A, 0x65, 0x23, 0x85, 0x23, 0x90,
-	0xDD, 0xE6, 0x24, 0xB0, 0xD9, 0xA2, 0x02, 0x4B, 0x7F, 0xB0, 0x35, 0x85,
-	0x54, 0xC8, 0xB1, 0x23, 0xA4, 0x54, 0x88, 0x91, 0x27, 0x88, 0x91, 0x27,
-	0xD0, 0xFB, 0xA9, 0x00, 0x90, 0xD6, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C,
-	0x5C, 0x00, 0x49, 0xBF, 0x65, 0x27, 0x85, 0x97, 0xA5, 0x28, 0xE9, 0x00,
-	0x85, 0x98, 0xB1, 0x97, 0x91, 0x27, 0xC8, 0xB1, 0x97, 0x91, 0x27, 0x98,
-	0xAA, 0x88, 0xF0, 0xB4, 0x4A, 0x85, 0x9C, 0xC8, 0xA5, 0x27, 0x90, 0x28,
-	0xF1, 0x23, 0x85, 0x97, 0xA5, 0x28, 0xE9, 0x00, 0x85, 0x98, 0x88, 0xB1,
-	0x97, 0x91, 0x27, 0xC8, 0xB1, 0x97, 0x91, 0x27, 0xC8, 0xB9, 0x97, 0x00,
-	0x91, 0x27, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0, 0x00, 0xF0, 0x89, 0xE6,
-	0x28, 0x18, 0x90, 0x8A, 0x38, 0xF1, 0x23, 0x85, 0x97, 0xA5, 0x28, 0xE9,
-	0x01, 0xB0, 0xD5
+	0x65, 0x27, 0x85, 0x27, 0xB0, 0x74, 0x8A, 0x65, 0x23, 0x85, 0x23, 0x90,
+	0xDD, 0xE6, 0x24, 0xB0, 0xD9, 0x4B, 0x7F, 0xB0, 0x37, 0x85, 0x52, 0xC8,
+	0xB1, 0x23, 0xA4, 0x52, 0x88, 0x91, 0x27, 0x88, 0x91, 0x27, 0xD0, 0xFB,
+	0xA9, 0x00, 0xA2, 0x02, 0x90, 0xD6, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C,
+	0x5C, 0x00, 0x49, 0xBF, 0x65, 0x27, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00,
+	0x85, 0x9B, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0x98,
+	0xAA, 0x88, 0xF0, 0xB4, 0x4A, 0x85, 0x9F, 0xC8, 0xA5, 0x27, 0x90, 0x2B,
+	0xF1, 0x23, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00, 0x85, 0x9B, 0xA2, 0x02,
+	0xA0, 0x00, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0xC8,
+	0xB9, 0x9A, 0x00, 0x91, 0x27, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0, 0x00,
+	0xB0, 0x86, 0xE6, 0x28, 0x18, 0x90, 0x87, 0x71, 0x23, 0x85, 0x9A, 0xC8,
+	0xB3, 0x23, 0x09, 0x80, 0x65, 0x28, 0x85, 0x9B, 0xE0, 0x80, 0x26, 0x9F,
+	0xA2, 0x03, 0xD0, 0xCC
 
 		]
 
@@ -66,11 +73,10 @@ def save_raw(fo, data):
 #finds all the occurrences of prefix in the range [max(0,i - LZOFFSET),i) 	
 #the search window is quite small, so brute force here performs as well as suffix trees
 def findall(data,prefix,i,minlz = MINLZ):
-
 	x0 = max(0,i - LZOFFSET)
 	x1 = min(i + minlz - 1, len(data))
 	f = 1
-	while f >=0:
+	while f >= 0:
 		f = data.rfind(prefix,x0,x1)
 		if f >= 0:
 			yield f
@@ -80,12 +86,13 @@ def findall(data,prefix,i,minlz = MINLZ):
 def progress(description,current,total):
 	percentage = 100 *current // total
 	tchars = 16 * current // total
-	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))
+	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))	
 	
 	
 class Token:
 	def __init__(self,src = None):
 		self.type = None
+
 
 class RLE(Token):
 	def __init__(self,src,i,size = None, token = None):
@@ -118,31 +125,41 @@ class LZ(Token):
 			self.fromToken(token)
 			
 		elif size == None: 
-			j = i - 1
+			
 			bestpos , bestlen = i - 1 , 0
 	
 			if len(src) - i >= minlz:
 				for j in findall(src,src[i:i+minlz],i,minlz):
 					
 					l = minlz 
-					while i + l < len(src) and l < LONGESTLZ and src[j + l] == src[i + l] :
+					while i + l < len(src) and l < LONGESTLONGLZ and src[j + l] == src[i + l] :
 						l += 1
 					if l > bestlen:
 						bestpos, bestlen = j , l
 	
 			self.size = bestlen
-			self.offset = i - bestpos
+			self.offset = i - bestpos	
 			
 		else:
 			self.size = size
 		if offset != None:
 			self.offset = offset
-	
+			
 	def getCost(self):
-		return 2 + 0.00134 - 0.00001 * self.size
+		return (2 if (self.offset < 256) and (self.size <= LONGESTLZ) else 3) + 0.00134 - 0.00001 * self.size
 		
 	def getPayload(self):
-		return [LZMASK | (((self.size - 1)<< 2) & 0x7f) | (2 if self.offset < 256 else 0) , (self.offset & 0xff) ]
+		if self.offset >= 256 or self.size > LONGESTLZ:
+			#if self.offset < 256:
+			#	return  [LZMASK | (((self.size - 1)<< 2) & 0x7f) | 2 , (self.offset & 0xff)]
+			#else:
+			#addb = self.absolute + addr[0] + 256 * addr[1] - 1  #add - 1 for decoder optimization
+			negoffset = (0-self.offset)# & 0xffff 
+			return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (negoffset & 0xff) , ((negoffset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
+			#return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (self.offset & 0xff) , ((self.offset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
+
+		else:
+			return [LZMASK | (((self.size - 1)<< 2) & 0x7f) | 2 , (self.offset & 0xff) ] 
 
 
 class LZ2(Token):
@@ -155,7 +172,7 @@ class LZ2(Token):
 			
 		elif offset == None: 
 			if i+2 < len(src):
-				o = src.rfind(src[i:i+2], max(0,i-63),i)
+				o = src.rfind(src[i:i+2], max(0,i-63),i + 1)
 				if o >= 0:
 					self.offset = i - o
 				else:
@@ -172,6 +189,7 @@ class LZ2(Token):
 		return 1 + 0.00132 - 0.00001 * self.size
 		
 	def getPayload(self):
+		#negoffset = (1 - self.offset) & 0x3f
 		return [LZ2MASK | (self.offset ) ]
 	
 	
@@ -235,22 +253,23 @@ class Cruncher:
 			rle = RLE(src,i)
 			#don't compute prefix for same bytes or this will explode
 			#start computing for prefixes larger than RLE
-			if rle.size < LONGESTLZ - 1:	
+			if rle.size < LONGESTLONGLZ - 1:	
 				lz = LZ(src,i, minlz = rle.size + 1)
 			else:
-				lz = LZ(src,i,1) #start with a dummy LZ
+				lz = LZ(src,i,size = 1) #start with a dummy LZ
 
 			if lz.size >= MINLZ or rle.size >= MINRLE:
 				starts.add(i)
 			while lz.size >= MINLZ and lz.size > rle.size:
 				ends.add(i+lz.size)
 				self.graph[(i,i+lz.size)] = lz
-				lz = LZ(src, i, lz.size - 1, lz.offset)
+				lz = LZ(src, i, size = lz.size - 1, offset = lz.offset)
 			while rle.size >= MINRLE:
 				ends.add(i+rle.size)
 				self.graph[(i,i+rle.size)] = rle
 				rle = RLE(src, i, rle.size - 1)
 	
+			
 			if (not RLEONLY) and len(src) - i > 2:
 				lz2 = LZ2(src,i)
 				if lz2.offset > 0:
@@ -299,6 +318,7 @@ class Cruncher:
 			sys.stdout.write('\n')
 	
 		progress_string = "Populating graph\t"
+		
 
 		if VERBOSE:
 			progress(progress_string,0,3)
@@ -318,6 +338,7 @@ class Cruncher:
 		for key in self.get_path(p):
 			#print (key)
 			self.token_list.append(self.graph[key])
+
 
 		if INPLACE:
 			safety = len(self.token_list)
@@ -345,6 +366,26 @@ class Cruncher:
 				self.crunched.extend(token.getPayload())	
 			self.crunched = bytes(self.crunched + [0])
 		self.crunchedSize = len(self.crunched)	
+
+		if DEBUG:
+			nlz2 = 0; nlzl = 0; nlz = 0; nrle = 0; nlit = 0; 
+
+			for token in self.token_list:
+				if token.type == LITERALID:
+					nlit+=1
+				elif token.type == LZ2ID:
+					nlz2 += 1
+				elif token.type == RLEID:
+					nrle +=1
+				else:
+					if len(token.getPayload()) == 3:
+						nlzl += 1
+					else:
+						nlz += 1
+			
+			tot = sum((nlz,nlzl,nlz2,nrle,nlit))
+			sys.stdout.write ("lz: %d, lzl: %d, lz2: %d, rle: %d, lit: %d tot: %d\n" % (nlz,nlzl,nlz2,nrle,nlit,tot))
+	
 
 class Decruncher:
 	def __init__(self, src = None):
@@ -395,12 +436,19 @@ class Decruncher:
 					nrle += 1
 					
 				else:
-					run = ((code & 0x7f) >> 2) + 1
-					offset = self.src[i+1] + (256 if code & 2 == 0 else 0)
+					if (code & 2) == 2:
+						run = ((code & 0x7f) >> 2) + 1
+						offset = self.src[i+1] #+ (256 if code & 2 == 0 else 0)
+						i+=2
+					else:
+						lookahead = self.src[i+2]
+						run = 1 + (((code & 0x7f) >> 2) << 1) + (1 if (lookahead & 128 == 128) else 0)
+						offset =  32768 - (self.src[i+1]  + 256 * (lookahead & 0x7f))
+						i+=3
 					p = len(self.decrunched)
 					for l in range(run):
+						
 						self.decrunched.append(self.decrunched[p-offset + l])			
-					i += 2
 					nlz +=1
 			
 			
@@ -410,7 +458,7 @@ class Decruncher:
 def usage():
 	print ("TSCrunch binary cruncher, by Antonio Savona")
 	print ("Usage: tscrunch [-p] [-i] [-r] [-q] [-x] infile outfile")
-	print (" -p  : input file is a prg, first 2 bytes are discarded.")
+	print (" -p  : input file is a prg, first 2 bytes are discarded")
 	print (" -x  $addr: creates a self extracting file (forces -p)")
 	print (" -i  : inplace crunching (forces -p)")
 	print (" -r  : switch to RLE mode for maximum decrunching speed but minimal compression")
@@ -442,7 +490,7 @@ if __name__ == "__main__":
 		if "-i" in sys.argv:
 			INPLACE = True
 			PRG = True
-		
+			
 		if "-p" in sys.argv:
 			PRG = True
 		
@@ -487,13 +535,14 @@ if __name__ == "__main__":
 			boot[0x3f] = startAddress >> 8  
 		    
 			boot[0x42] = decrunchTo & 0xff # decrunch to..
-			boot[0x43] = decrunchTo >> 8 #
+			boot[0x43] = decrunchTo >> 8 
 		    
 			boot[0x78] = jmp & 0xff; # Jump to..
-			boot[0x79] = jmp >> 8;   #
+			boot[0x79] = jmp >> 8;   
 			
 			cruncher.prepend(boot)
 
+			cruncher.crunchedSize += len(boot)
 			loadTo = 0x0801
 			
 		decrunchEnd = decrunchTo + len(src) - 1
@@ -515,7 +564,7 @@ if __name__ == "__main__":
 			  %("PRG" if SFX or INPLACE else "RAW", sys.argv[-1],  loadTo, cruncher.crunchedSize + loadTo - 1, cruncher.crunchedSize))
 			print ("crunched to %.2f%% of original size" %ratio)
 			
-		if DEBUG and not (SFX or INPLACE or RLEONLY):
+		if DEBUG and not (SFX or INPLACE):
 			decruncher = Decruncher(cruncher.crunched)
 		
 			fo = open("test.raw","wb")
