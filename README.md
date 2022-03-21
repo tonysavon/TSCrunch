@@ -77,4 +77,6 @@ Future development
 
 Block-loading management for integration in disk loaders.
 
-Speed up crunching, possibly rewriting the code C.
+Improve compression implementing repeated matches
+
+
