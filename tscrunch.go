@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 )
 
 type crunchCtx struct {
@@ -80,8 +81,15 @@ var boot = []byte{
 	0xA2, 0x03, 0xD0, 0xCC,
 }
 
+var wg sync.WaitGroup
+var mg, ms, me sync.Mutex
+
+var starts = make(map[int]bool)
+var ends = make(map[int]bool)
+var graph = make(map[edge]token)
+
 func usage() {
-	fmt.Println("TSCrunch binary cruncher, by Antonio Savona")
+	fmt.Println("TSCrunch 1.2 - binary cruncher, by Antonio Savona")
 	fmt.Println("Usage: tscrunch [-p] [-i] [-q] [-x $addr] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
@@ -259,11 +267,61 @@ func LIT(i int, size int) token {
 	return lit
 }
 
-func crunch(src []byte, ctx crunchCtx) []byte {
+func processByte(src []byte, i int) {
+	rle := RLE(src, i, 0, 0)
+	//don't compute prefix for same bytes or this will explode
+	//start computing for prefixes larger than RLE
+	var lz token
+	if rle.size < LONGESTLONGLZ-1 {
+		lz = LZ(src, i, 0, 0, rle.size+1)
+	} else {
+		lz = LZ(src, -1, -1, -1, -1) // start with a dummy lz
+	}
 
-	starts := make(map[int]bool)
-	ends := make(map[int]bool)
-	graph := make(map[edge]token)
+	if lz.size >= MINLZ || rle.size >= MINRLE {
+		ms.Lock()
+		starts[i] = true
+		ms.Unlock()
+	}
+	for size := lz.size; size >= MINLZ && size > rle.size; size-- {
+		me.Lock()
+		ends[i+size] = true
+		me.Unlock()
+
+		mg.Lock()
+		graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ)
+		mg.Unlock()
+	}
+	for size := rle.size; size >= MINRLE; size-- {
+		me.Lock()
+		ends[i+size] = true
+		me.Unlock()
+
+		mg.Lock()
+		graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
+		mg.Unlock()
+	}
+
+	if len(src)-i > 2 {
+		lz2 := LZ2(src, i, 0, 0)
+		if lz2.size == 2 {
+			mg.Lock()
+			graph[edge{i, i + 2}] = lz2 //LZ2ID
+			mg.Unlock()
+
+			ms.Lock()
+			starts[i] = true
+			ms.Unlock()
+
+			me.Lock()
+			ends[i+2] = true
+			me.Unlock()
+		}
+	}
+	wg.Done()
+}
+
+func crunch(src []byte, ctx crunchCtx) []byte {
 
 	remainder := []byte{}
 
@@ -272,39 +330,15 @@ func crunch(src []byte, ctx crunchCtx) []byte {
 		src = src[:len(src)-1]
 	}
 
-	for i := 0; i < len(src); i++ {
-		rle := RLE(src, i, 0, 0)
-		//don't compute prefix for same bytes or this will explode
-		//start computing for prefixes larger than RLE
-		var lz token
-		if rle.size < LONGESTLONGLZ-1 {
-			lz = LZ(src, i, 0, 0, rle.size+1)
-		} else {
-			lz = LZ(src, -1, -1, -1, -1) // start with a dummy lz
-		}
-
-		if lz.size >= MINLZ || rle.size >= MINRLE {
-			starts[i] = true
-		}
-		for size := lz.size; size >= MINLZ && size > rle.size; size-- {
-			ends[i+size] = true
-			graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ)
-		}
-		for size := rle.size; size >= MINRLE; size-- {
-			ends[i+size] = true
-			graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
-		}
-
-		if len(src)-i > 2 {
-			lz2 := LZ2(src, i, 0, 0)
-			if lz2.size == 2 {
-				graph[edge{i, i + 2}] = lz2 //LZ2ID
-				starts[i] = true
-				ends[i+2] = true
-			}
-		}
-
+	if !ctx.QUIET {
+		fmt.Println("Populating LZ layer")
 	}
+
+	for i := 0; i < len(src); i++ {
+		wg.Add(1)
+		go processByte(src, i)
+	}
+	wg.Wait()
 
 	starts[len(src)] = true
 	ends[0] = true
@@ -457,6 +491,7 @@ func main() {
 
 	ifidx := flag.NArg() - 2
 	ofidx := flag.NArg() - 1
+
 	src := load_raw(flag.Args()[ifidx])
 
 	sourceLen := len(src)
