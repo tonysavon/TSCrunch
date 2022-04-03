@@ -9,6 +9,7 @@ import (
 	"dijkstra" //go get github.com/RyanCarrier/dijkstra
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -39,46 +40,51 @@ type token struct {
 	i         int
 }
 
-const LONGESTRLE = 63
+const LONGESTRLE = 64
 const LONGESTLONGLZ = 64
 const LONGESTLZ = 32
-const LONGESTLITERAL = 63
+const LONGESTLITERAL = 31
 const MINRLE = 2
 const MINLZ = 3
 const LZOFFSET = 32767
+const LZ2OFFSET = 94
 
-const RLEMASK = 0x80
-const LZMASK = 0x81
+const RLEMASK = 0x81
+const LZMASK = 0x80
 const LITERALMASK = 0x00
-const LZ2MASK = 0x40
+const LZ2MASK = 0x00
+
+const TERMINATOR = LONGESTLITERAL + 1
 
 const LZ2ID = 3
 const LZID = 2
 const RLEID = 1
 const LITERALID = 4
 const LONGLZID = 5
+const ZERORUNID = 6
 
 var boot = []byte{
 
 	0x01, 0x08, 0x0B, 0x08, 0x0A, 0x00, 0x9E, 0x32, 0x30, 0x36, 0x31, 0x00,
-	0x00, 0x00, 0x78, 0xA2, 0xC0, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
+	0x00, 0x00, 0x78, 0xA2, 0xC9, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
 	0xF8, 0x4C, 0x02, 0x00, 0x34, 0xBD, 0x00, 0x10, 0x9D, 0x00, 0xFF, 0xE8,
 	0xD0, 0xF7, 0xC6, 0x04, 0xC6, 0x07, 0xA5, 0x04, 0xC9, 0x07, 0xB0, 0xED,
-	0xA0, 0x00, 0xB3, 0x23, 0x30, 0x23, 0xF0, 0x3A, 0xC9, 0x40, 0xB0, 0x3E,
-	0xA8, 0xB9, 0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8,
-	0x65, 0x27, 0x85, 0x27, 0xB0, 0x74, 0x8A, 0x65, 0x23, 0x85, 0x23, 0x90,
-	0xDD, 0xE6, 0x24, 0xB0, 0xD9, 0x4B, 0x7F, 0xB0, 0x37, 0x85, 0x52, 0xC8,
-	0xB1, 0x23, 0xA4, 0x52, 0x88, 0x91, 0x27, 0x88, 0x91, 0x27, 0xD0, 0xFB,
-	0xA9, 0x00, 0xA2, 0x02, 0x90, 0xD6, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C,
-	0x5C, 0x00, 0x49, 0xBF, 0x65, 0x27, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00,
-	0x85, 0x9B, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0x98,
-	0xAA, 0x88, 0xF0, 0xB4, 0x4A, 0x85, 0x9F, 0xC8, 0xA5, 0x27, 0x90, 0x2B,
-	0xF1, 0x23, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00, 0x85, 0x9B, 0xA2, 0x02,
-	0xA0, 0x00, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0xC8,
-	0xB9, 0x9A, 0x00, 0x91, 0x27, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0, 0x00,
-	0xB0, 0x86, 0xE6, 0x28, 0x18, 0x90, 0x87, 0x71, 0x23, 0x85, 0x9A, 0xC8,
-	0xB3, 0x23, 0x09, 0x80, 0x65, 0x28, 0x85, 0x9B, 0xE0, 0x80, 0x26, 0x9F,
-	0xA2, 0x03, 0xD0, 0xCC,
+	0xA0, 0x00, 0xB3, 0x21, 0x30, 0x21, 0xC9, 0x20, 0xB0, 0x3F, 0xA8, 0xB9,
+	0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8, 0x65, 0x25,
+	0x85, 0x25, 0xB0, 0x77, 0x8A, 0x65, 0x21, 0x85, 0x21, 0x90, 0xDF, 0xE6,
+	0x22, 0xB0, 0xDB, 0x4B, 0x7F, 0x90, 0x3A, 0xF0, 0x6B, 0xA2, 0x02, 0x85,
+	0x53, 0xC8, 0xB1, 0x21, 0xA4, 0x53, 0x91, 0x25, 0x88, 0x91, 0x25, 0xD0,
+	0xFB, 0xA9, 0x00, 0xB0, 0xD5, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C, 0x5B,
+	0x00, 0xF0, 0xF6, 0x09, 0x80, 0x65, 0x25, 0x85, 0x9B, 0xA5, 0x26, 0xE9,
+	0x00, 0x85, 0x9C, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
+	0x98, 0xAA, 0x88, 0xF0, 0xB1, 0x4A, 0x85, 0xA0, 0xC8, 0xA5, 0x25, 0x90,
+	0x33, 0xF1, 0x21, 0x85, 0x9B, 0xA5, 0x26, 0xE9, 0x00, 0x85, 0x9C, 0xA2,
+	0x02, 0xA0, 0x00, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
+	0xC8, 0xB9, 0x9B, 0x00, 0x91, 0x25, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0,
+	0x00, 0xB0, 0x83, 0xE6, 0x26, 0x18, 0x90, 0x84, 0xA0, 0xFF, 0x84, 0x53,
+	0xA2, 0x01, 0xD0, 0x96, 0x71, 0x21, 0x85, 0x9B, 0xC8, 0xB3, 0x21, 0x09,
+	0x80, 0x65, 0x26, 0x85, 0x9C, 0xE0, 0x80, 0x26, 0xA0, 0xA2, 0x03, 0xD0,
+	0xC4,
 }
 
 var wg sync.WaitGroup
@@ -88,8 +94,10 @@ var starts = make(map[int]bool)
 var ends = make(map[int]bool)
 var graph = make(map[edge]token)
 
+var optimalRun int = 0
+
 func usage() {
-	fmt.Println("TSCrunch 1.2 - binary cruncher, by Antonio Savona")
+	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
 	fmt.Println("Usage: tscrunch [-p] [-i] [-q] [-x $addr] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
@@ -143,6 +151,40 @@ func findall(data []byte, prefix []byte, i int, minlz int) <-chan int {
 	return c
 }
 
+func findOptimalZeroRun(src []byte) int {
+	zeroruns := make(map[int]int)
+	var i = 0
+	var j = 0
+	for i < len(src)-1 {
+		if src[i] == 0 {
+			j = i + 1
+			for j < len(src) && src[j] == 0 && j-i < 256 {
+				j += 1
+			}
+			if j-i >= MINRLE {
+				zeroruns[j-i] = zeroruns[j-i] + 1
+			}
+			i = j
+		} else {
+			i += 1
+		}
+	}
+	if len(zeroruns) > 0 {
+		bestrun := 0
+		bestvalue := 0.0
+		for key, amount := range zeroruns {
+			currentvalue := float64(key) * math.Pow(float64(amount), 1.1)
+			if currentvalue > bestvalue {
+				bestrun = key
+				bestvalue = currentvalue
+			}
+		}
+		return bestrun
+	} else {
+		return LONGESTRLE
+	}
+}
+
 func tokenCost(n0, n1 int, t byte) int64 {
 	size := int64(n1 - n0)
 	mdiv := int64(LONGESTLITERAL * (1 << 16))
@@ -153,6 +195,8 @@ func tokenCost(n0, n1 int, t byte) int64 {
 		return mdiv*3 + 134 - size
 	case RLEID:
 		return mdiv*2 + 128 - size
+	case ZERORUNID:
+		return mdiv * 1
 	case LZ2ID:
 		return mdiv*1 + 132 - size
 	case LITERALID:
@@ -174,9 +218,11 @@ func tokenPayload(src []byte, t token) []byte {
 		negoffset := (0 - t.offset)
 		return []byte{byte(LZMASK | (((t.size-1)>>1)<<2)&0x7f), byte(negoffset & 0xff), byte(((negoffset >> 8) & 0x7f) | (((t.size - 1) & 1) << 7))}
 	} else if t.tokentype == RLEID {
-		return []byte{RLEMASK | byte((t.size<<1)&0x7f), t.rlebyte}
+		return []byte{RLEMASK | byte(((t.size-1)<<1)&0x7f), t.rlebyte}
+	} else if t.tokentype == ZERORUNID {
+		return []byte{RLEMASK}
 	} else if t.tokentype == LZ2ID {
-		return []byte{LZ2MASK | byte(t.offset)}
+		return []byte{LZ2MASK | byte(0x7f-t.offset)}
 	} else {
 		return append([]byte{byte(LITERALMASK | t.size)}, src[n0:n1]...)
 	}
@@ -234,6 +280,25 @@ func RLE(src []byte, i int, size int, rlebyte byte) token {
 	return rle
 }
 
+func ZERORUN(src []byte, i int, optimalRun int) token {
+	var zero token
+	zero.tokentype = ZERORUNID
+
+	zero.i = i
+	zero.rlebyte = 0
+	zero.size = 0
+
+	if i >= 0 {
+		var x int
+		for x = 0; x < optimalRun && i+x < len(src) && src[i+x] == 0; x++ {
+		}
+		if x == optimalRun {
+			zero.size = optimalRun
+		}
+	}
+	return zero
+}
+
 func LZ2(src []byte, i int, size int, offset int) token {
 	var lz2 token
 	lz2.tokentype = LZ2ID
@@ -244,7 +309,7 @@ func LZ2(src []byte, i int, size int, offset int) token {
 
 	if i >= 0 {
 		if i+2 < len(src) {
-			leftbound := max(0, i-63)
+			leftbound := max(0, i-LZ2OFFSET)
 			lpart := src[leftbound : i+1]
 			o := bytes.LastIndex(lpart, src[i:i+2])
 			if o >= 0 {
@@ -267,7 +332,7 @@ func LIT(i int, size int) token {
 	return lit
 }
 
-func processByte(src []byte, i int) {
+func crunchAtByte(src []byte, i int) {
 	rle := RLE(src, i, 0, 0)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE
@@ -283,6 +348,7 @@ func processByte(src []byte, i int) {
 		starts[i] = true
 		ms.Unlock()
 	}
+
 	for size := lz.size; size >= MINLZ && size > rle.size; size-- {
 		me.Lock()
 		ends[i+size] = true
@@ -292,6 +358,7 @@ func processByte(src []byte, i int) {
 		graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ)
 		mg.Unlock()
 	}
+
 	for size := rle.size; size >= MINRLE; size-- {
 		me.Lock()
 		ends[i+size] = true
@@ -318,6 +385,22 @@ func processByte(src []byte, i int) {
 			me.Unlock()
 		}
 	}
+
+	zero := ZERORUN(src, i, optimalRun)
+	if zero.size != 0 {
+		mg.Lock()
+		graph[edge{i, i + optimalRun}] = zero
+		mg.Unlock()
+
+		ms.Lock()
+		starts[i] = true
+		ms.Unlock()
+
+		me.Lock()
+		ends[i+optimalRun] = true
+		me.Unlock()
+	}
+
 	wg.Done()
 }
 
@@ -325,10 +408,18 @@ func crunch(src []byte, ctx crunchCtx) []byte {
 
 	remainder := []byte{}
 
+	var G = dijkstra.NewGraph()
+
+	for i := 0; i < len(src)+1; i++ {
+		G.AddVertex(i)
+	}
+
 	if ctx.INPLACE {
 		remainder = src[len(src)-1:]
 		src = src[:len(src)-1]
 	}
+
+	optimalRun = findOptimalZeroRun(src)
 
 	if !ctx.QUIET {
 		fmt.Println("Populating LZ layer")
@@ -336,7 +427,7 @@ func crunch(src []byte, ctx crunchCtx) []byte {
 
 	for i := 0; i < len(src); i++ {
 		wg.Add(1)
-		go processByte(src, i)
+		go crunchAtByte(src, i)
 	}
 	wg.Wait()
 
@@ -394,10 +485,6 @@ func crunch(src []byte, ctx crunchCtx) []byte {
 		fmt.Println("Populating Graph")
 	}
 
-	G := dijkstra.NewGraph()
-	for i := 0; i < len(src)+1; i++ {
-		G.AddVertex(i)
-	}
 	for k, t := range graph {
 		G.AddArc(k.n0, k.n1, tokenCost(k.n0, k.n1, t.tokentype))
 	}
@@ -437,16 +524,20 @@ func crunch(src []byte, ctx crunchCtx) []byte {
 		if total_uncrunched_size > 0 {
 			remainder = append(src[len(src)-total_uncrunched_size:], remainder...)
 		}
-		crunched = append(crunched, 0)
+		crunched = append(crunched, TERMINATOR)
 		crunched = append(crunched, remainder[1:]...)
 		crunched = append(remainder[:1], crunched...)
+		crunched = append([]byte{byte(optimalRun - 1)}, crunched...)
 		crunched = append(ctx.addr, crunched...)
 
 	} else {
 		for _, t := range token_list {
 			crunched = append(crunched, tokenPayload(src, t)...)
 		}
-		crunched = append(crunched, 0)
+		crunched = append(crunched, TERMINATOR)
+		if !ctx.SFX {
+			crunched = append([]byte{byte(optimalRun - 1)}, crunched...)
+		}
 	}
 
 	return crunched
@@ -514,14 +605,16 @@ func main() {
 		boot[0x1e] = byte(transfAddress & 0xff) //transfer from
 		boot[0x1f] = byte(transfAddress >> 8)
 
-		boot[0x3e] = byte(startAddress & 0xff) //Depack from..
-		boot[0x3f] = byte(startAddress >> 8)
+		boot[0x3c] = byte(startAddress & 0xff) //Depack from..
+		boot[0x3d] = byte(startAddress >> 8)
 
-		boot[0x42] = byte(ctx.decrunchTo & 0xff) //decrunch to..
-		boot[0x43] = byte(ctx.decrunchTo >> 8)
+		boot[0x40] = byte(ctx.decrunchTo & 0xff) //decrunch to..
+		boot[0x41] = byte(ctx.decrunchTo >> 8)
 
-		boot[0x78] = byte(ctx.jmp & 0xff) // Jump to..
-		boot[0x79] = byte(ctx.jmp >> 8)
+		boot[0x77] = byte(ctx.jmp & 0xff) // Jump to..
+		boot[0x78] = byte(ctx.jmp >> 8)
+
+		boot[0xc9] = byte(optimalRun - 1)
 
 		crunched = append(boot, crunched...)
 

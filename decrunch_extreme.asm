@@ -1,6 +1,6 @@
 /*
 
-decrunch.asm
+decrunch_extreme.asm
 
 NMOS 6502 decompressor for data stored in TSCrunch format.
 
@@ -65,16 +65,29 @@ tsdecrunch:
 			lda lzput
 			sta optRun + 1
 			
+			ldx #$d0 //bne opcode
+			and #1
+			bne !skp+
+			ldx #$29 //and immediate opcode
+		!skp:
+			stx optOdd 
+
 			tya
 			ldy #0
 			beq update_getonly
 	#else 
 			ldy #0			
 	
-
 			lda (tsget),y
 			sta optRun + 1
 
+			ldx #$d0 //bne opcode
+			and #1
+			bne !skp+
+			ldx #$29 //and immediate opcode
+		!skp:
+			stx optOdd 
+			
 			inc tsget
 			bne entry2
 			inc tsget + 1
@@ -87,7 +100,6 @@ tsdecrunch:
 			
 			cmp #$20
 			bcs lz2	
-
 	//literal
 			
 	#if INPLACE
@@ -95,9 +107,16 @@ tsdecrunch:
 			inc tsget
 			beq updatelit_hi
 		return_from_updatelit:
+			and #1
+			bne !odd+
 		
 		ts_delit_loop:
 
+			lda (tsget),y
+			sta (tsput),y
+			iny
+			dex
+		!odd:	
 			lda (tsget),y
 			sta (tsput),y
 			iny
@@ -111,9 +130,16 @@ tsdecrunch:
 			ldy #0
 	#else	//not inplace
 			tay
-			
+		
+			and #1
+			bne !odd+
+				
 		ts_delit_loop:
 			
+			lda (tsget),y
+			dey
+			sta (tsput),y
+		!odd:	
 			lda (tsget),y
 			dey
 			sta (tsput),y
@@ -146,43 +172,7 @@ tsdecrunch:
 			inc tsput+1
 			clc
 			bcc putnoof
-						
-	rleorlz:
-			
-			alr #$7f
-			bcc ts_delz		
-
-		//RLE
-			beq optRun
-				
-		plain:
-			ldx #2
-			iny
-			sta tstemp		//number of bytes to de-rle		
-
-			lda (tsget),y	//fetch rle byte
-			ldy tstemp
-		!runStart:
-			sta (tsput),y
-			
-		ts_derle_loop:
-			
-			dey
-			sta (tsput),y
-
-			bne ts_derle_loop
-			
-			//update zero page with a = runlen, x = 2 , y = 0 
-			lda tstemp		
-
-			bcs updatezp_noclc
-			
-	   done:
-#if INPLACE	   
-	   		pla
-	   		sta (tsput),y
-#endif	   		
-			rts	
+	
 	//LZ2	
 		lz2:
 			beq done
@@ -215,7 +205,54 @@ tsdecrunch:
 
 		lz2_put_hi:
 			inc tsput + 1
-			bcs !skp-	
+			bcs !skp-		
+										
+	rleorlz:
+			
+			alr #$7f
+			bcc ts_delz		
+
+		//RLE
+			beq zeroRun
+				
+		plain:
+			
+			iny
+			sta tstemp		//number of bytes to de-rle		
+
+			lsr				//c = test parity
+		
+			lda (tsget),y	//fetch rle byte
+			ldy tstemp
+		runStart:
+			sta (tsput),y
+
+			bcs !odd+
+			sec
+			
+		ts_derle_loop:
+			dey
+			sta (tsput),y
+		!odd:
+	
+			dey
+			sta (tsput),y
+			
+			bne ts_derle_loop
+			
+			//update zero page with a = runlen, x = 2 , y = 0 
+			lda tstemp		
+			ldx #2
+			bcs updatezp_noclc
+	
+					
+	   done:
+#if INPLACE	   
+	   		pla
+	   		sta (tsput),y
+#endif	   		
+			rts	
+	
 
 	//LZ
 	ts_delz:
@@ -240,16 +277,21 @@ tsdecrunch:
 			sta lzput+1
 			
 			ldy #0
-	
+		
+			lda lzto + 1
+			lsr
+			bcs !odd+
+
 			lda (lzput),y
 			sta (tsput),y
-			
+	ts_delz_loop:			
 			iny
+
+	!odd:		
+
 			lda (lzput),y
 			sta (tsput),y
-	
-	ts_delz_loop:
-	
+
 			iny
 		
 			lda (lzput),y
@@ -263,17 +305,24 @@ tsdecrunch:
 			//update zero page with a = runlen, x = 2, y = 0
 			ldy #0
 			//clc not needed as we have len - 1 in A (from the encoder) and C = 1
-
 			jmp updatezp_noclc
 	
-	optRun:	
-			ldy #255
-			sty tstemp
-
-			ldx #1
-			//A is zero
+	zeroRun:		
+	optRun:	ldy #255
+			sta (tsput),y
+	optOdd:	bne !odd+
+	ts_dezero_loop:
+			dey
+			sta (tsput),y
+		!odd:
+			dey
+			sta (tsput),y
+			bne ts_dezero_loop
 			
-			bne !runStart-		
+		    lda optRun + 1
+		    
+			ldx #1
+			jmp updatezp_noclc		
 
 	long:
 			//carry is clear and compensated for from the encoder

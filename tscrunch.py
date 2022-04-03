@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 
 """
-TSCrunch binary cruncher, by Antonio Savona
+TSCrunch 1.3 - binary cruncher, by Antonio Savona
 """
 
 import sys
 
-RLEONLY			=	False
 REVERSELITERAL	=	False
 VERBOSE			=	True
 PRG				=	False
@@ -15,19 +14,23 @@ INPLACE			=	False
 
 DEBUG = False
 
-LONGESTRLE		=	127 if RLEONLY else 63
+LONGESTRLE		=	64
 LONGESTLONGLZ	=	64 
 LONGESTLZ 		=	32
-LONGESTLITERAL	=	127 if RLEONLY else 63
+LONGESTLITERAL	=	31
 MINRLE			=	2
 MINLZ			=	3
-LZOFFSET		=	32767 #511
+LZOFFSET		=	32767
+LZ2OFFSET 		=	94
 
-RLEMASK 		= 	0x80
-LZMASK			= 	0x81
+RLEMASK 		= 	0x81
+LZMASK			= 	0x80
 LITERALMASK 	= 	0x00
-LZ2MASK 		=	0x40
+LZ2MASK 		=	0x00
 
+TERMINATOR 		=	LONGESTLITERAL + 1 
+
+ZERORUNID		=	4
 LZ2ID 			=	3
 LZID 			= 	2
 RLEID 			= 	1
@@ -37,31 +40,30 @@ LITERALID 		= 	0
 from scipy.sparse.csgraph import dijkstra
 from scipy.sparse import csr_matrix
 
-
 boot = [
 
 	0x01, 0x08, 0x0B, 0x08, 0x0A, 0x00, 0x9E, 0x32, 0x30, 0x36, 0x31, 0x00,
-	0x00, 0x00, 0x78, 0xA2, 0xC0, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
+	0x00, 0x00, 0x78, 0xA2, 0xC9, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
 	0xF8, 0x4C, 0x02, 0x00, 0x34, 0xBD, 0x00, 0x10, 0x9D, 0x00, 0xFF, 0xE8,
 	0xD0, 0xF7, 0xC6, 0x04, 0xC6, 0x07, 0xA5, 0x04, 0xC9, 0x07, 0xB0, 0xED,
-	0xA0, 0x00, 0xB3, 0x23, 0x30, 0x23, 0xF0, 0x3A, 0xC9, 0x40, 0xB0, 0x3E,
-	0xA8, 0xB9, 0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8,
-	0x65, 0x27, 0x85, 0x27, 0xB0, 0x74, 0x8A, 0x65, 0x23, 0x85, 0x23, 0x90,
-	0xDD, 0xE6, 0x24, 0xB0, 0xD9, 0x4B, 0x7F, 0xB0, 0x37, 0x85, 0x52, 0xC8,
-	0xB1, 0x23, 0xA4, 0x52, 0x88, 0x91, 0x27, 0x88, 0x91, 0x27, 0xD0, 0xFB,
-	0xA9, 0x00, 0xA2, 0x02, 0x90, 0xD6, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C,
-	0x5C, 0x00, 0x49, 0xBF, 0x65, 0x27, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00,
-	0x85, 0x9B, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0x98,
-	0xAA, 0x88, 0xF0, 0xB4, 0x4A, 0x85, 0x9F, 0xC8, 0xA5, 0x27, 0x90, 0x2B,
-	0xF1, 0x23, 0x85, 0x9A, 0xA5, 0x28, 0xE9, 0x00, 0x85, 0x9B, 0xA2, 0x02,
-	0xA0, 0x00, 0xB1, 0x9A, 0x91, 0x27, 0xC8, 0xB1, 0x9A, 0x91, 0x27, 0xC8,
-	0xB9, 0x9A, 0x00, 0x91, 0x27, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0, 0x00,
-	0xB0, 0x86, 0xE6, 0x28, 0x18, 0x90, 0x87, 0x71, 0x23, 0x85, 0x9A, 0xC8,
-	0xB3, 0x23, 0x09, 0x80, 0x65, 0x28, 0x85, 0x9B, 0xE0, 0x80, 0x26, 0x9F,
-	0xA2, 0x03, 0xD0, 0xCC
+	0xA0, 0x00, 0xB3, 0x21, 0x30, 0x21, 0xC9, 0x20, 0xB0, 0x3F, 0xA8, 0xB9,
+	0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8, 0x65, 0x25,
+	0x85, 0x25, 0xB0, 0x77, 0x8A, 0x65, 0x21, 0x85, 0x21, 0x90, 0xDF, 0xE6,
+	0x22, 0xB0, 0xDB, 0x4B, 0x7F, 0x90, 0x3A, 0xF0, 0x6B, 0xA2, 0x02, 0x85,
+	0x53, 0xC8, 0xB1, 0x21, 0xA4, 0x53, 0x91, 0x25, 0x88, 0x91, 0x25, 0xD0,
+	0xFB, 0xA9, 0x00, 0xB0, 0xD5, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C, 0x5B,
+	0x00, 0xF0, 0xF6, 0x09, 0x80, 0x65, 0x25, 0x85, 0x9B, 0xA5, 0x26, 0xE9,
+	0x00, 0x85, 0x9C, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
+	0x98, 0xAA, 0x88, 0xF0, 0xB1, 0x4A, 0x85, 0xA0, 0xC8, 0xA5, 0x25, 0x90,
+	0x33, 0xF1, 0x21, 0x85, 0x9B, 0xA5, 0x26, 0xE9, 0x00, 0x85, 0x9C, 0xA2,
+	0x02, 0xA0, 0x00, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
+	0xC8, 0xB9, 0x9B, 0x00, 0x91, 0x25, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0,
+	0x00, 0xB0, 0x83, 0xE6, 0x26, 0x18, 0x90, 0x84, 0xA0, 0xFF, 0x84, 0x53,
+	0xA2, 0x01, 0xD0, 0x96, 0x71, 0x21, 0x85, 0x9B, 0xC8, 0xB3, 0x21, 0x09,
+	0x80, 0x65, 0x26, 0x85, 0x9C, 0xE0, 0x80, 0x26, 0xA0, 0xA2, 0x03, 0xD0,
+	0xC4
 
 		]
-
 
 def load_raw(fi):
 	data = bytes(fi.read())
@@ -86,14 +88,50 @@ def findall(data,prefix,i,minlz = MINLZ):
 def progress(description,current,total):
 	percentage = 100 *current // total
 	tchars = 16 * current // total
-	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))	
+	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))
 	
+	
+def findOptimalZero(src):
+	zeroruns = dict()
+	i = 0
+	while i < len(src) - 1:
+		
+		if src[i] == 0:
+			j = i + 1
+			while j < len(src) and src[j] == 0 and j-i < 256:
+				j+=1
+			if j - i >= MINRLE:
+				zeroruns[j-i] = zeroruns.get(j-i,0) + 1	
+			i = j
+		else:
+			i+=1
+	
+	if len(zeroruns) > 0:
+		return 	min(list(zeroruns.items()),key = lambda x:-x[0]*(x[1]**1.1))[0]
+	else: 
+		return LONGESTRLE	
 	
 class Token:
 	def __init__(self,src = None):
 		self.type = None
 
 
+class ZERORUN(Token):
+	def __init__(self,src,i,size = LONGESTRLE, token = None):
+		self.type = ZERORUNID
+		self.size = size
+		if token != None:
+			self.fromToken(token)
+		else:
+			if not(i+size < len(src) and src[i:i+size] == bytes([0] * size)):
+				self.size = 0
+			
+	def getCost(self):
+		return 1
+	
+	def getPayload(self):
+		return [RLEMASK]
+	
 class RLE(Token):
 	def __init__(self,src,i,size = None, token = None):
 		self.type = RLEID
@@ -105,7 +143,7 @@ class RLE(Token):
 		elif size == None:
 			x = 0
 			while i + x < len(src) and x < LONGESTRLE and src[i + x] == src[i]:
-				x += 1
+				x+=1
 			self.size = x
 		else:
 			self.size = size
@@ -114,7 +152,7 @@ class RLE(Token):
 		return 2 + 0.00128 - 0.00001 * self.size
 
 	def getPayload(self):
-		return [RLEMASK | ((self.size & 0x7f) if RLEONLY else (self.size << 1) & 0x7f ), self.rleByte]
+		return [RLEMASK | (((self.size-1) << 1) & 0x7f ), self.rleByte]
 	
 	
 class LZ(Token):
@@ -133,7 +171,7 @@ class LZ(Token):
 					
 					l = minlz 
 					while i + l < len(src) and l < LONGESTLONGLZ and src[j + l] == src[i + l] :
-						l += 1
+						l+=1
 					if l > bestlen:
 						bestpos, bestlen = j , l
 	
@@ -150,14 +188,8 @@ class LZ(Token):
 		
 	def getPayload(self):
 		if self.offset >= 256 or self.size > LONGESTLZ:
-			#if self.offset < 256:
-			#	return  [LZMASK | (((self.size - 1)<< 2) & 0x7f) | 2 , (self.offset & 0xff)]
-			#else:
-			#addb = self.absolute + addr[0] + 256 * addr[1] - 1  #add - 1 for decoder optimization
-			negoffset = (0-self.offset)# & 0xffff 
+			negoffset = (0-self.offset) 
 			return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (negoffset & 0xff) , ((negoffset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
-			#return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (self.offset & 0xff) , ((self.offset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
-
 		else:
 			return [LZMASK | (((self.size - 1)<< 2) & 0x7f) | 2 , (self.offset & 0xff) ] 
 
@@ -172,7 +204,7 @@ class LZ2(Token):
 			
 		elif offset == None: 
 			if i+2 < len(src):
-				o = src.rfind(src[i:i+2], max(0,i-63),i + 1)
+				o = src.rfind(src[i:i+2], max(0,i-LZ2OFFSET),i + 1)
 				if o >= 0:
 					self.offset = i - o
 				else:
@@ -189,8 +221,7 @@ class LZ2(Token):
 		return 1 + 0.00132 - 0.00001 * self.size
 		
 	def getPayload(self):
-		#negoffset = (1 - self.offset) & 0x3f
-		return [LZ2MASK | (self.offset ) ]
+		return [LZ2MASK | (127 - self.offset) ]
 	
 	
 class LIT(Token):
@@ -206,21 +237,19 @@ class LIT(Token):
 		return self.size + 1 + 0.00130 - 0.00001 * self.size
 
 	def getPayload(self):
-		return bytes([LITERALMASK | self.size]) + src[self.start : self.start + self.size]
+		return bytes([LITERALMASK | (self.size)]) + src[self.start : self.start + self.size]
 	
 	
 class Cruncher:
 
 	def __init__(self, src = None):
-
 		self.crunched = []
 		self.token_list = []
 		self.src = src
 		self.graph = dict()
 		self.crunchedSize = 0
 
-	def get_path(self,p):
-		
+	def get_path(self,p):	
 		i = len(p) - 1
 		path = [i]
 		while p[i] >= 0:
@@ -234,7 +263,6 @@ class Cruncher:
 		self.crunched = bytes(data) + bytes(self.crunched)
 	
 	def ocrunch(self):
-		
 		starts = set()
 		ends = set()
 
@@ -244,6 +272,9 @@ class Cruncher:
 		else:
 			src = bytes(self.src)
 		
+		
+		self.optimalRun = findOptimalZero(src)
+		
 		progress_string = "Populating LZ layer\t"
 		
 		for i in range(0,len(src)):	
@@ -251,6 +282,7 @@ class Cruncher:
 				progress(progress_string,i,len(src))
 			lz2 = None
 			rle = RLE(src,i)
+			
 			#don't compute prefix for same bytes or this will explode
 			#start computing for prefixes larger than RLE
 			if rle.size < LONGESTLONGLZ - 1:	
@@ -269,14 +301,19 @@ class Cruncher:
 				self.graph[(i,i+rle.size)] = rle
 				rle = RLE(src, i, rle.size - 1)
 	
-			
-			if (not RLEONLY) and len(src) - i > 2:
-				lz2 = LZ2(src,i)
-				if lz2.offset > 0:
-					self.graph[(i,i+2)] = lz2
-					starts.add(i)
-					ends.add(i + 2)
-		
+			lz2 = LZ2(src,i)
+			if lz2.offset > 0:
+				self.graph[(i,i+2)] = lz2
+				starts.add(i)
+				ends.add(i + 2)
+				 
+			zero = ZERORUN(src,i,self.optimalRun)
+			if zero.size > 0:
+				self.graph[(i,i+self.optimalRun)] = zero
+				starts.add(i)
+				ends.add(i+self.optimalRun)
+				
+				
 		if VERBOSE:
 			progress(progress_string,1,1)
 			sys.stdout.write('\n')
@@ -300,7 +337,7 @@ class Cruncher:
 						lit = LIT(src,end)
 						lit.size = LONGESTLITERAL
 						self.graph[key] = lit
-					end += LONGESTLITERAL
+					end+=LONGESTLITERAL
 				s0 = s
 				while s0 < len(starts) and starts[s0] - end < LONGESTLITERAL:
 					key = (end,starts[s0])
@@ -308,7 +345,7 @@ class Cruncher:
 						lit = LIT(src,end)
 						lit.size = starts[s0] - end
 						self.graph[key] = lit
-					s0 += 1
+					s0+=1
 				e+=1
 			else:
 				s+=1
@@ -319,7 +356,6 @@ class Cruncher:
 	
 		progress_string = "Populating graph\t"
 		
-
 		if VERBOSE:
 			progress(progress_string,0,3)
 		weights = tuple(v.getCost() for v in self.graph.values())
@@ -336,9 +372,7 @@ class Cruncher:
 			sys.stdout.write('\ncomputing shortest path\n')		
 		d,p = dijkstra(dgraph,indices = 0,return_predecessors = True)
 		for key in self.get_path(p):
-			#print (key)
 			self.token_list.append(self.graph[key])
-
 
 		if INPLACE:
 			safety = len(self.token_list)
@@ -346,45 +380,51 @@ class Cruncher:
 			segment_crunched_size = 0
 			total_uncrunched_size = 0
 			for i in range(len(self.token_list)-1,-1,-1):
-				segment_crunched_size += len(self.token_list[i].getPayload()) #token size
-				segment_uncrunched_size += self.token_list[i].size #decrunched token raw size
+				segment_crunched_size+=len(self.token_list[i].getPayload()) #token size
+				segment_uncrunched_size+=self.token_list[i].size #decrunched token raw size
 				if segment_uncrunched_size <= segment_crunched_size + 0:
 					safety = i
-					total_uncrunched_size += segment_uncrunched_size
+					total_uncrunched_size+=segment_uncrunched_size
 					segment_uncrunched_size = 0
 					segment_crunched_size = 0
-			
+
 			for token in (self.token_list[:safety]):
 				self.crunched.extend(token.getPayload())
 			if total_uncrunched_size > 0:
 				remainder = src[-total_uncrunched_size:] + remainder
-			self.crunched.extend(bytes([0]) + remainder[1:])
-			self.crunched = addr + remainder[:1] + bytes(self.crunched)
+			self.crunched.extend(bytes([TERMINATOR]) + remainder[1:])
+			self.crunched = addr + bytes([self.optimalRun - 1]) + remainder[:1] + bytes(self.crunched)
 			
 		else:
+			if not SFX:
+				self.crunched.extend([self.optimalRun - 1])
 			for token in (self.token_list):
 				self.crunched.extend(token.getPayload())	
-			self.crunched = bytes(self.crunched + [0])
+			self.crunched = bytes(self.crunched + [TERMINATOR])
 		self.crunchedSize = len(self.crunched)	
 
 		if DEBUG:
-			nlz2 = 0; nlzl = 0; nlz = 0; nrle = 0; nlit = 0; 
+			nlz2 = 0; nlzl = 0; nlz = 0; nrle = 0; nlit = 0; nz = 0; nlit1 = 0
 
 			for token in self.token_list:
 				if token.type == LITERALID:
 					nlit+=1
+					if token.size == 1:
+						nlit1+=1
 				elif token.type == LZ2ID:
-					nlz2 += 1
+					nlz2+=1
 				elif token.type == RLEID:
 					nrle +=1
+				elif token.type == ZERORUNID:
+					nz +=1
 				else:
 					if len(token.getPayload()) == 3:
-						nlzl += 1
+						nlzl+=1
 					else:
-						nlz += 1
+						nlz+=1
 			
-			tot = sum((nlz,nlzl,nlz2,nrle,nlit))
-			sys.stdout.write ("lz: %d, lzl: %d, lz2: %d, rle: %d, lit: %d tot: %d\n" % (nlz,nlzl,nlz2,nrle,nlit,tot))
+			tot = sum((nlz,nlzl,nlz2,nrle,nz,nlit))
+			sys.stdout.write ("lz: %d, lzl: %d, lz2: %d, rle: %d, nz: %d, lit: %d (1 = %d) tot: %d\n" % (nlz,nlzl,nlz2,nrle,nz,nlit,nlit1,tot))
 	
 
 class Decruncher:
@@ -401,44 +441,50 @@ class Decruncher:
 			self.decrunched = None
 		else:
 			
-			nlz2 = 0; nlz = 0; nrle = 0; nlit = 0; 
+			nlz2 = 0; nlz = 0; nrle = 0; nz = 0; nlit = 0; 
 			
 			self.decrunched = bytearray([])
-			i=0
-			while self.src[i] != 0:
+			self.optimalRun = self.src[0] + 1
+			i=1
+			while self.src[i] != TERMINATOR:
 				
 				code = self.src[i]
-				if (RLEONLY and code & 0x80 == LITERALMASK) or ((not RLEONLY) and (code & 0xC0 == LITERALMASK)) :
+				if ((code & 0x80 == LITERALMASK) and code & 0x7f < 32) :
 										
-					run = (code & 0x3f) if not RLEONLY else (code & 0x7f)
+					run = (code & 0x1f)
 					chunk = self.src[i + 1 : i + run + 1]
 					if REVERSELITERAL:
 						chunk.reverse()
 					self.decrunched.extend(chunk)
-					i += run + 1
-					nlit += 1
-					
-					
-				elif not RLEONLY and (code & 0xC0 == LZ2MASK):
+					i+=run + 1
+					nlit+=1
+							
+				elif (code & 0x80 == LZ2MASK):
 					
 					run = 2
-					offset =   code & 0x3f 
+					offset =  127 - (code & 0x7f) 
 					p = len(self.decrunched)
 					for l in range(run):
 						self.decrunched.append(self.decrunched[p-offset + l])
-					i += 1
-					nlz2 += 1	
+					i+=1
+					nlz2+=1	
 					
-				elif RLEONLY or (not RLEONLY and (code & 0x81) == RLEMASK):
-					run = (code & 0x7f) if RLEONLY else ((code & 0x7f) >> 1)
+				elif (code & 0x81) == RLEMASK and (code & 0x7e) != 0:
+					run = ((code & 0x7f) >> 1) + 1
 					self.decrunched.extend([self.src[i+1]] * run)
-					i += 2
-					nrle += 1
+					i+=2
+					nrle+=1
+					
+				elif (code & 0x81) == RLEMASK and (code & 0x7e)	== 0:
+					run = self.optimalRun
+					self.decrunched.extend(bytes([0] * run))
+					i+=1
+					nz+=1
 					
 				else:
 					if (code & 2) == 2:
 						run = ((code & 0x7f) >> 2) + 1
-						offset = self.src[i+1] #+ (256 if code & 2 == 0 else 0)
+						offset = self.src[i+1]
 						i+=2
 					else:
 						lookahead = self.src[i+2]
@@ -447,21 +493,18 @@ class Decruncher:
 						i+=3
 					p = len(self.decrunched)
 					for l in range(run):
-						
 						self.decrunched.append(self.decrunched[p-offset + l])			
-					nlz +=1
-			
-			
-			tot = sum((nlz,nlz2,nrle,nlit))
-			sys.stdout.write ("lz: %d, lz2: %d, rle: %d, lit: %d tot: %d\n" % (nlz,nlz2,nrle,nlit,tot))
+					nlz+=1
+					
+			tot = sum((nlz,nlz2,nrle,nz,nlit))
+			sys.stdout.write ("lz: %d, lz2: %d, rle: %d, nz: %d,  lit: %d tot: %d\n" % (nlz,nlz2,nrle,nz,nlit,tot))
 	
 def usage():
-	print ("TSCrunch binary cruncher, by Antonio Savona")
+	print ("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
 	print ("Usage: tscrunch [-p] [-i] [-r] [-q] [-x] infile outfile")
 	print (" -p  : input file is a prg, first 2 bytes are discarded")
 	print (" -x  $addr: creates a self extracting file (forces -p)")
 	print (" -i  : inplace crunching (forces -p)")
-	print (" -r  : switch to RLE mode for maximum decrunching speed but minimal compression")
 	print (" -q  : quiet mode")
 	
 
@@ -470,14 +513,7 @@ if __name__ == "__main__":
 	if "-h" in sys.argv or len(sys.argv) < 3:
 		usage()
 	else:
-
-		if "-r" in sys.argv:
-			RLEONLY = True
-			LONGESTRLE = 127
-		
-		if "-b" in sys.argv:
-			REVERSELITERAL = True
-
+	
 		if "-q" in sys.argv:
 			VERBOSE = False
 
@@ -494,16 +530,8 @@ if __name__ == "__main__":
 		if "-p" in sys.argv:
 			PRG = True
 		
-		if SFX and RLEONLY:
-			sys.stderr.write ("Can't create an sfx prg in RLE only mode\n")
-			exit(-1)
-		
 		if SFX and INPLACE:
 			sys.stderr.write ("Can't create an sfx prg with inplace crunching\n")
-			exit(-1)
-
-		if RLEONLY and INPLACE:
-			sys.stderr.write ("Can't create an rle-only prg with inplace crunching\n")
 			exit(-1)
 			
 		fr = open(sys.argv[-2],"rb")
@@ -531,18 +559,20 @@ if __name__ == "__main__":
 			boot[0x1e] = transfAddress & 0xff #transfer from
 			boot[0x1f] = transfAddress >> 8
 			
-			boot[0x3e] = startAddress & 0xff # Depack from..
-			boot[0x3f] = startAddress >> 8  
+			boot[0x3c] = startAddress & 0xff # Depack from..
+			boot[0x3d] = startAddress >> 8  
 		    
-			boot[0x42] = decrunchTo & 0xff # decrunch to..
-			boot[0x43] = decrunchTo >> 8 
+			boot[0x40] = decrunchTo & 0xff # decrunch to..
+			boot[0x41] = decrunchTo >> 8 
 		    
-			boot[0x78] = jmp & 0xff; # Jump to..
-			boot[0x79] = jmp >> 8;   
+			boot[0x77] = jmp & 0xff; # Jump to..
+			boot[0x78] = jmp >> 8;   
+			
+			boot[0xc9] = cruncher.optimalRun - 1
 			
 			cruncher.prepend(boot)
 
-			cruncher.crunchedSize += len(boot)
+			cruncher.crunchedSize+=len(boot)
 			loadTo = 0x0801
 			
 		decrunchEnd = decrunchTo + len(src) - 1

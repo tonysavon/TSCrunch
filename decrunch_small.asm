@@ -70,7 +70,6 @@ tsdecrunch:
 			beq update_getonly
 	#else 
 			ldy #0			
-	
 
 			lda (tsget),y
 			sta optRun + 1
@@ -146,9 +145,9 @@ tsdecrunch:
 			inc tsput+1
 			clc
 			bcc putnoof
-						
+				
+											
 	rleorlz:
-			
 			alr #$7f
 			bcc ts_delz		
 
@@ -201,21 +200,11 @@ tsdecrunch:
 			lda (lzput),y
 			sta (tsput),y
 					
-			tya
-			dey
+			tya //y = a = 1. 
+			tax //y = a = x = 1. a + carry = 2
+			dey //ldy #0
 			
-			adc tsput
-			sta tsput
-			bcs lz2_put_hi
-		!skp:	
-			inc tsget
-			bne entry2
-			inc tsget + 1
-			bne entry2			
-
-		lz2_put_hi:
-			inc tsput + 1
-			bcs !skp-	
+			beq updatezp_noclc
 
 	//LZ
 	ts_delz:
@@ -243,10 +232,6 @@ tsdecrunch:
 	
 			lda (lzput),y
 			sta (tsput),y
-			
-			iny
-			lda (lzput),y
-			sta (tsput),y
 	
 	ts_delz_loop:
 	
@@ -263,16 +248,18 @@ tsdecrunch:
 			//update zero page with a = runlen, x = 2, y = 0
 			ldy #0
 			//clc not needed as we have len - 1 in A (from the encoder) and C = 1
-
+		#if INPLACE
 			jmp updatezp_noclc
-	
+		#else	
+			bcs updatezp_noclc
+		#endif
+		
 	optRun:	
 			ldy #255
 			sty tstemp
 
 			ldx #1
-			//A is zero
-			
+			//A is zero		
 			bne !runStart-		
 
 	long:
