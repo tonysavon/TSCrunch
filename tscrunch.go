@@ -138,7 +138,7 @@ func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-cha
 				}
 			}
 
-			for o := mid; o >= 0 && parray[o] > x0; o-- {
+			for o := mid; len(parray) > 0 && o >= 0 && parray[o] > x0; o-- {
 				if parray[o] < i && bytes.Equal(data[parray[o]:parray[o]+minlz], prefix) {
 					c <- parray[o]
 				}
