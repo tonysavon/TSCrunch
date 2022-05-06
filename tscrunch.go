@@ -125,7 +125,7 @@ func New(opt Options, r io.Reader) (*tsc, error) {
 		graph:   make(map[edge]token),
 		//prefix arrays for efficient prefix search don't really improve performance, here
 		//due to the small search window.
-		usePrefixArray: false,
+		usePrefixArray: true,
 	}
 	return t, nil
 }
