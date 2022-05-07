@@ -15,9 +15,9 @@ import (
 func usage() {
 	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
 	fmt.Println("Multi-hack by burg, quickly compile multiple files")
-	fmt.Println("Usage: tscrunch [-raw] [-i] [-q] infile infile infile")
+	fmt.Println("Usage: tscrunch [-p] [-i] [-q] infile infile infile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
-	fmt.Println(" -i  : inplace crunching (disables -raw)")
+	fmt.Println(" -i  : inplace crunching (forces -p)")
 	fmt.Println(" -q  : quiet mode")
 }
 
