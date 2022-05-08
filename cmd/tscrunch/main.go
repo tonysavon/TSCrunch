@@ -11,7 +11,7 @@ import (
 	"runtime/pprof"
 	"time"
 
-	"github.com/staD020/TSCrunch"
+	"github.com/tonysavon/TSCrunch"
 )
 
 func usage() {

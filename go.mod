@@ -1,4 +1,4 @@
-module github.com/staD020/TSCrunch
+module github.com/tonysavon/TSCrunch
 
 go 1.17
 
