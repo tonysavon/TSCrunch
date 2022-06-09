@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tonysavon/TSCrunch"
+	"github.com/staD020/TSCrunch"
 )
 
 func usage() {
