@@ -13,7 +13,6 @@ import (
 	"os"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/RyanCarrier/dijkstra"
@@ -36,12 +35,8 @@ type tsc struct {
 	options        Options
 	src            []byte
 	starts         map[int]bool
-	startsMtx      sync.Mutex
 	ends           map[int]bool
-	endsMtx        sync.Mutex
 	graph          map[edge]token
-	graphMtx       sync.Mutex
-	wg             sync.WaitGroup
 	optimalRun     int
 	crunchedSize   int
 	sourceLen      int
@@ -120,9 +115,9 @@ func New(opt Options, r io.Reader) (*tsc, error) {
 	t := &tsc{
 		options: opt,
 		src:     src,
-		starts:  make(map[int]bool),
-		ends:    make(map[int]bool),
-		graph:   make(map[edge]token),
+		starts:  make(map[int]bool, 0xffff),
+		ends:    make(map[int]bool, 0xffff),
+		graph:   make(map[edge]token, 0xffff),
 		//prefix arrays for efficient prefix search don't really improve performance, here
 		//due to the small search window.
 		usePrefixArray: true,
@@ -215,19 +210,20 @@ func (t *tsc) findall(prefix []byte, i int, minlz int) <-chan int {
 			}
 			close(c)
 		}()
-	} else {
-		f := 1
-		go func() {
-			for f >= 0 {
-				f = bytes.LastIndex(t.src[x0:x1], prefix)
-				if f >= 0 {
-					c <- f + x0
-					x1 = x0 + f + minlz - 1
-				}
-			}
-			close(c)
-		}()
+		return c
 	}
+
+	go func() {
+		f := 1
+		for f >= 0 {
+			f = bytes.LastIndex(t.src[x0:x1], prefix)
+			if f >= 0 {
+				c <- f + x0
+				x1 = x0 + f + minlz - 1
+			}
+		}
+		close(c)
+	}()
 	return c
 }
 
@@ -414,7 +410,6 @@ func LIT(i int, size int) token {
 
 //func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 func (t *tsc) crunchAtByte(i int) {
-	defer t.wg.Done()
 	rle := t.RLE(i, 0, 0)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE size
@@ -426,61 +421,43 @@ func (t *tsc) crunchAtByte(i int) {
 	}
 
 	if lz.size >= MINLZ || rle.size >= MINRLE {
-		t.startsMtx.Lock()
 		t.starts[i] = true
-		t.startsMtx.Unlock()
 	}
 
 	for size := lz.size; size >= MINLZ && size > rle.size; size-- {
-		t.endsMtx.Lock()
-		t.ends[i+size] = true
-		t.endsMtx.Unlock()
-
-		t.graphMtx.Lock()
 		t.graph[edge{i, i + size}] = t.LZ(-1, size, lz.offset, MINLZ)
-		t.graphMtx.Unlock()
+		t.ends[i+size] = true
 	}
 
-	for size := rle.size; size >= MINRLE; size-- {
-		t.endsMtx.Lock()
-		t.ends[i+size] = true
-		t.endsMtx.Unlock()
-
-		t.graphMtx.Lock()
-		t.graph[edge{i, i + size}] = t.RLE(-1, size, t.src[i])
-		t.graphMtx.Unlock()
+	/*
+		// this part of the RLE implementation consumes tons of RAM, shouldnt need to store all
+		for size := rle.size; size >= MINRLE; size-- {
+			t.graph[edge{i, i + size}] = t.RLE(-1, size, t.src[i])
+			t.ends[i+size] = true
+		}
+	*/
+	// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
+	if rle.size >= MINRLE {
+		t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
+		t.ends[i+rle.size] = true
+		t.graph[edge{i, i + MINRLE}] = t.RLE(-1, MINRLE, t.src[i])
+		t.ends[i+MINRLE] = true
 	}
 
 	if len(t.src)-i > 2 {
 		lz2 := t.LZ2(i, 0, 0)
 		if lz2.size == 2 {
-			t.graphMtx.Lock()
 			t.graph[edge{i, i + 2}] = lz2 //LZ2ID
-			t.graphMtx.Unlock()
-
-			t.startsMtx.Lock()
 			t.starts[i] = true
-			t.startsMtx.Unlock()
-
-			t.endsMtx.Lock()
 			t.ends[i+2] = true
-			t.endsMtx.Unlock()
 		}
 	}
 
 	zero := t.ZERORUN(i)
 	if zero.size != 0 {
-		t.graphMtx.Lock()
 		t.graph[edge{i, i + t.optimalRun}] = zero
-		t.graphMtx.Unlock()
-
-		t.startsMtx.Lock()
 		t.starts[i] = true
-		t.startsMtx.Unlock()
-
-		t.endsMtx.Lock()
 		t.ends[i+t.optimalRun] = true
-		t.endsMtx.Unlock()
 	}
 }
 
@@ -508,14 +485,11 @@ func (t *tsc) crunch() []byte {
 	if !t.options.QUIET {
 		fmt.Print("Populating LZ layer")
 	}
-
 	tm := time.Now()
 
 	for i := 0; i < len(t.src); i++ {
-		t.wg.Add(1)
-		go t.crunchAtByte(i)
+		t.crunchAtByte(i)
 	}
-	t.wg.Wait()
 
 	if !t.options.QUIET {
 		if t.options.STATS {
