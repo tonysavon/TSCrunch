@@ -2,39 +2,41 @@
 TSCrunch binary cruncher, by Antonio Savona
 */
 
-package main
+package TSCrunch
 
 import (
 	"bytes"
-	"flag"
+	_ "embed"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/RyanCarrier/dijkstra"
 )
 
-type tokenGraph struct {
-	wg           sync.WaitGroup
-	mg, ms, me   sync.Mutex
-	starts, ends map[int]bool
-	graph        map[edge]token
+type Options struct {
+	QUIET      bool
+	PRG        bool
+	SFX        bool
+	INPLACE    bool
+	STATS      bool
+	JumpTo     string
+	jmp        uint16
+	decrunchTo uint16
+	loadTo     uint16
+	addr       []byte
 }
 
-type crunchCtx struct {
-	QUIET          bool
-	STATS          bool
-	PRG            bool
-	SFX            bool
-	INPLACE        bool
-	jmp            uint16
-	decrunchTo     uint16
-	loadTo         uint16
-	addr           []byte
+type tsc struct {
+	options        Options
+	src            []byte
+	starts         map[int]bool
+	ends           map[int]bool
+	graph          map[edge]token
 	optimalRun     int
 	crunchedSize   int
 	sourceLen      int
@@ -79,6 +81,83 @@ const LITERALID = 4
 const LONGLZID = 5
 const ZERORUNID = 6
 
+func New(opt Options, r io.Reader) (*tsc, error) {
+	if opt.JumpTo != "" {
+		opt.SFX = true
+		opt.loadTo = 0x0801
+		opt.PRG = true
+	}
+	if opt.INPLACE {
+		opt.PRG = true
+	}
+	if opt.SFX {
+		if opt.JumpTo[0] == '$' {
+			jmp, err := strconv.ParseUint(opt.JumpTo[1:], 16, 16)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse jump address %q: %w", opt.JumpTo, err)
+			}
+			opt.jmp = uint16(jmp)
+		}
+		if opt.jmp == 0 {
+			return nil, fmt.Errorf("incorrect jump address %q", opt.JumpTo)
+		}
+	}
+	src, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("ReadAll failed for r %v", r)
+	}
+	if opt.PRG {
+		opt.addr = src[:2]
+		src = src[2:]
+		opt.decrunchTo = uint16(opt.addr[0]) + 256*uint16(opt.addr[1])
+	}
+
+	t := &tsc{
+		options: opt,
+		src:     src,
+		starts:  make(map[int]bool, 0xffff),
+		ends:    make(map[int]bool, 0xffff),
+		graph:   make(map[edge]token, 0xffff),
+		//prefix arrays for efficient prefix search don't really improve performance, here
+		//due to the small search window.
+		usePrefixArray: true,
+	}
+	return t, nil
+}
+
+func (t *tsc) WriteTo(w io.Writer) (int64, error) {
+	buf := t.crunch()
+	decrunchEnd := uint16(int(t.options.decrunchTo) + len(t.src) - 1)
+	if t.options.INPLACE {
+		t.options.loadTo = decrunchEnd - uint16(len(buf)) + 1
+		buf = append([]byte{byte(t.options.loadTo & 0xff), byte(t.options.loadTo >> 8)}, buf...)
+	}
+
+	n, err := w.Write(buf)
+	if err != nil {
+		return int64(n), err
+	}
+
+	if !t.options.QUIET {
+		ratio := float32(len(buf)) * 100.0 / float32(len(t.src))
+		srcPrg := "RAW"
+		destPrg := "RAW"
+		if t.options.PRG {
+			srcPrg = "PRG"
+		}
+		if t.options.SFX || t.options.INPLACE {
+			destPrg = "PRG"
+		}
+		fmt.Printf("input file  %s, $%04x - $%04x : %d bytes\n",
+			srcPrg, t.options.decrunchTo, decrunchEnd, len(t.src))
+		fmt.Printf("output file %s, $%04x - $%04x : %d bytes\n",
+			destPrg, t.options.loadTo, len(buf)+int(t.options.loadTo)-1, len(buf))
+		fmt.Printf("crunched to %.2f%% of original size\n", ratio)
+	}
+
+	return int64(n), err
+}
+
 func min(x, y int) int {
 	if x < y {
 		return x
@@ -93,34 +172,20 @@ func max(x, y int) int {
 	return y
 }
 
-func load_raw(f string) []byte {
-	data, err := os.ReadFile(f)
-	if err == nil {
-		return data
-	} else {
-		fmt.Println("can't read data")
-		return nil
+func (t *tsc) fillPrefixArray() {
+	t.prefixArray = make(map[[MINLZ]byte][]int)
+	for i := 0; i < len(t.src)-MINLZ; i++ {
+		t.prefixArray[*(*[MINLZ]byte)(t.src[i:])] = append(t.prefixArray[*(*[MINLZ]byte)(t.src[i:])], i)
 	}
 }
 
-func save_raw(f string, data []byte) {
-	os.WriteFile(f, data, 0666)
-}
-
-func fillPrefixArray(data []byte, ctx *crunchCtx) {
-	ctx.prefixArray = make(map[[MINLZ]byte][]int)
-	for i := 0; i < len(data)-MINLZ; i++ {
-		ctx.prefixArray[*(*[MINLZ]byte)(data[i:])] = append(ctx.prefixArray[*(*[MINLZ]byte)(data[i:])], i)
-	}
-}
-
-func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-chan int {
+func (t *tsc) findall(prefix []byte, i int, minlz int) <-chan int {
 	c := make(chan int)
 	x0 := max(0, i-LZOFFSET)
-	x1 := min(i+minlz-1, len(data))
+	x1 := min(i+minlz-1, len(t.src))
 
-	if ctx.usePrefixArray {
-		parray := ctx.prefixArray[*(*[MINLZ]byte)(prefix[:MINLZ])]
+	if t.usePrefixArray {
+		parray := t.prefixArray[*(*[MINLZ]byte)(prefix[:MINLZ])]
 		go func() {
 			//binary search to the closest entry on the left
 			l := 0
@@ -139,36 +204,37 @@ func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-cha
 			}
 
 			for o := mid; len(parray) > 0 && o >= 0 && parray[o] > x0; o-- {
-				if parray[o] < i && bytes.Equal(data[parray[o]:parray[o]+minlz], prefix) {
+				if parray[o] < i && bytes.Equal(t.src[parray[o]:parray[o]+minlz], prefix) {
 					c <- parray[o]
 				}
 			}
 			close(c)
 		}()
-	} else {
-		f := 1
-		go func() {
-			for f >= 0 {
-				f = bytes.LastIndex(data[x0:x1], prefix)
-				if f >= 0 {
-					c <- f + x0
-					x1 = x0 + f + minlz - 1
-				}
-			}
-			close(c)
-		}()
+		return c
 	}
+
+	go func() {
+		f := 1
+		for f >= 0 {
+			f = bytes.LastIndex(t.src[x0:x1], prefix)
+			if f >= 0 {
+				c <- f + x0
+				x1 = x0 + f + minlz - 1
+			}
+		}
+		close(c)
+	}()
 	return c
 }
 
-func findOptimalZeroRun(src []byte) int {
+func (t *tsc) findOptimalZeroRun() int {
 	zeroruns := make(map[int]int)
 	var i = 0
 	var j = 0
-	for i < len(src)-1 {
-		if src[i] == 0 {
+	for i < len(t.src)-1 {
+		if t.src[i] == 0 {
 			j = i + 1
-			for j < len(src) && src[j] == 0 && j-i < 256 {
+			for j < len(t.src) && t.src[j] == 0 && j-i < 256 {
 				j += 1
 			}
 			if j-i >= MINRLE {
@@ -217,7 +283,7 @@ func tokenCost(n0, n1 int, t byte) int64 {
 	return 0
 }
 
-func tokenPayload(src []byte, t token) []byte {
+func (ts *tsc) tokenPayload(t token) []byte {
 
 	n0 := t.i
 	n1 := t.i + t.size
@@ -234,11 +300,11 @@ func tokenPayload(src []byte, t token) []byte {
 	} else if t.tokentype == LZ2ID {
 		return []byte{LZ2MASK | byte(0x7f-t.offset)}
 	} else {
-		return append([]byte{byte(LITERALMASK | t.size)}, src[n0:n1]...)
+		return append([]byte{byte(LITERALMASK | t.size)}, ts.src[n0:n1]...)
 	}
 }
 
-func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) token {
+func (t *tsc) LZ(i int, size int, offset int, minlz int) token {
 	var lz token
 	lz.tokentype = LZID
 	lz.i = i
@@ -247,11 +313,11 @@ func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) toke
 		bestpos := i - 1
 		bestlen := 0
 
-		if len(src)-i >= minlz {
-			prefixes := findall(src, src[i:i+minlz], i, minlz, ctx)
+		if len(t.src)-i >= minlz {
+			prefixes := t.findall(t.src[i:i+minlz], i, minlz)
 			for j := range prefixes {
 				l := minlz
-				for i+l < len(src) && l < LONGESTLONGLZ && src[j+l] == src[i+l] {
+				for i+l < len(t.src) && l < LONGESTLONGLZ && t.src[j+l] == t.src[i+l] {
 					l++
 				}
 				if l > bestlen {
@@ -272,14 +338,14 @@ func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) toke
 	return lz
 }
 
-func RLE(src []byte, i int, size int, rlebyte byte) token {
+func (t *tsc) RLE(i int, size int, rlebyte byte) token {
 	var rle token
 	rle.tokentype = RLEID
 	rle.i = i
 	if i >= 0 {
-		rle.rlebyte = src[i]
+		rle.rlebyte = t.src[i]
 		x := 0
-		for i+x < len(src) && x < LONGESTRLE && src[i+x] == src[i] {
+		for i+x < len(t.src) && x < LONGESTRLE && t.src[i+x] == t.src[i] {
 			x++
 		}
 		rle.size = x
@@ -290,7 +356,7 @@ func RLE(src []byte, i int, size int, rlebyte byte) token {
 	return rle
 }
 
-func ZERORUN(src []byte, i int, optimalRun int) token {
+func (t *tsc) ZERORUN(i int) token {
 	var zero token
 	zero.tokentype = ZERORUNID
 
@@ -300,16 +366,16 @@ func ZERORUN(src []byte, i int, optimalRun int) token {
 
 	if i >= 0 {
 		var x int
-		for x = 0; x < optimalRun && i+x < len(src) && src[i+x] == 0; x++ {
+		for x = 0; x < t.optimalRun && i+x < len(t.src) && t.src[i+x] == 0; x++ {
 		}
-		if x == optimalRun {
-			zero.size = optimalRun
+		if x == t.optimalRun {
+			zero.size = t.optimalRun
 		}
 	}
 	return zero
 }
 
-func LZ2(src []byte, i int, size int, offset int) token {
+func (t *tsc) LZ2(i int, size int, offset int) token {
 	var lz2 token
 	lz2.tokentype = LZ2ID
 
@@ -318,10 +384,10 @@ func LZ2(src []byte, i int, size int, offset int) token {
 	lz2.i = i
 
 	if i >= 0 {
-		if i+2 < len(src) {
+		if i+2 < len(t.src) {
 			leftbound := max(0, i-LZ2OFFSET)
-			lpart := src[leftbound : i+1]
-			o := bytes.LastIndex(lpart, src[i:i+2])
+			lpart := t.src[leftbound : i+1]
+			o := bytes.LastIndex(lpart, t.src[i:i+2])
 			if o >= 0 {
 				lz2.offset = i - (o + leftbound)
 				lz2.size = 2
@@ -342,175 +408,112 @@ func LIT(i int, size int) token {
 	return lit
 }
 
-func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
-	rle := RLE(src, i, 0, 0)
+//func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
+func (t *tsc) crunchAtByte(i int) {
+	rle := t.RLE(i, 0, 0)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE size
 	var lz token
 	if rle.size < LONGESTLONGLZ-1 {
-		lz = LZ(src, i, 0, 0, rle.size+1, ctx)
+		lz = t.LZ(i, 0, 0, rle.size+1)
 	} else {
-		lz = LZ(src, -1, -1, -1, -1, ctx) // start with a dummy lz
+		lz = t.LZ(-1, -1, -1, -1) // start with a dummy lz
 	}
 
 	if lz.size >= MINLZ || rle.size >= MINRLE {
-		tg.ms.Lock()
-		tg.starts[i] = true
-		tg.ms.Unlock()
+		t.starts[i] = true
 	}
 
 	for size := lz.size; size >= MINLZ && size > rle.size; size-- {
-		tg.me.Lock()
-		tg.ends[i+size] = true
-		tg.me.Unlock()
-
-		tg.mg.Lock()
-		tg.graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ, ctx)
-		tg.mg.Unlock()
+		t.graph[edge{i, i + size}] = t.LZ(-1, size, lz.offset, MINLZ)
+		t.ends[i+size] = true
 	}
 
-	for size := rle.size; size >= MINRLE; size-- {
-		tg.me.Lock()
-		tg.ends[i+size] = true
-		tg.me.Unlock()
-
-		tg.mg.Lock()
-		tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
-		tg.mg.Unlock()
+	/*
+		// this part of the RLE implementation consumes tons of RAM, shouldnt need to store all
+		for size := rle.size; size >= MINRLE; size-- {
+			t.graph[edge{i, i + size}] = t.RLE(-1, size, t.src[i])
+			t.ends[i+size] = true
+		}
+	*/
+	// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
+	if rle.size >= MINRLE {
+		t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
+		t.ends[i+rle.size] = true
+		t.graph[edge{i, i + MINRLE}] = t.RLE(-1, MINRLE, t.src[i])
+		t.ends[i+MINRLE] = true
 	}
 
-	if len(src)-i > 2 {
-		lz2 := LZ2(src, i, 0, 0)
+	if len(t.src)-i > 2 {
+		lz2 := t.LZ2(i, 0, 0)
 		if lz2.size == 2 {
-			tg.mg.Lock()
-			tg.graph[edge{i, i + 2}] = lz2 //LZ2ID
-			tg.mg.Unlock()
-
-			tg.ms.Lock()
-			tg.starts[i] = true
-			tg.ms.Unlock()
-
-			tg.me.Lock()
-			tg.ends[i+2] = true
-			tg.me.Unlock()
+			t.graph[edge{i, i + 2}] = lz2 //LZ2ID
+			t.starts[i] = true
+			t.ends[i+2] = true
 		}
 	}
 
-	zero := ZERORUN(src, i, ctx.optimalRun)
+	zero := t.ZERORUN(i)
 	if zero.size != 0 {
-		tg.mg.Lock()
-		tg.graph[edge{i, i + ctx.optimalRun}] = zero
-		tg.mg.Unlock()
-
-		tg.ms.Lock()
-		tg.starts[i] = true
-		tg.ms.Unlock()
-
-		tg.me.Lock()
-		tg.ends[i+ctx.optimalRun] = true
-		tg.me.Unlock()
+		t.graph[edge{i, i + t.optimalRun}] = zero
+		t.starts[i] = true
+		t.ends[i+t.optimalRun] = true
 	}
-
-	tg.wg.Done()
 }
 
-func crunch(src []byte, ctx *crunchCtx) []byte {
-
-	var boot = []byte{
-
-		0x01, 0x08, 0x0B, 0x08, 0x0A, 0x00, 0x9E, 0x32, 0x30, 0x36, 0x31, 0x00,
-		0x00, 0x00, 0x78, 0xA2, 0xC9, 0xBD, 0x1A, 0x08, 0x95, 0x00, 0xCA, 0xD0,
-		0xF8, 0x4C, 0x02, 0x00, 0x34, 0xBD, 0x00, 0x10, 0x9D, 0x00, 0xFF, 0xE8,
-		0xD0, 0xF7, 0xC6, 0x04, 0xC6, 0x07, 0xA5, 0x04, 0xC9, 0x07, 0xB0, 0xED,
-		0xA0, 0x00, 0xB3, 0x21, 0x30, 0x21, 0xC9, 0x20, 0xB0, 0x3F, 0xA8, 0xB9,
-		0xFF, 0xFF, 0x88, 0x99, 0xFF, 0xFF, 0xD0, 0xF7, 0x8A, 0xE8, 0x65, 0x25,
-		0x85, 0x25, 0xB0, 0x77, 0x8A, 0x65, 0x21, 0x85, 0x21, 0x90, 0xDF, 0xE6,
-		0x22, 0xB0, 0xDB, 0x4B, 0x7F, 0x90, 0x3A, 0xF0, 0x6B, 0xA2, 0x02, 0x85,
-		0x53, 0xC8, 0xB1, 0x21, 0xA4, 0x53, 0x91, 0x25, 0x88, 0x91, 0x25, 0xD0,
-		0xFB, 0xA9, 0x00, 0xB0, 0xD5, 0xA9, 0x37, 0x85, 0x01, 0x58, 0x4C, 0x5B,
-		0x00, 0xF0, 0xF6, 0x09, 0x80, 0x65, 0x25, 0x85, 0x9B, 0xA5, 0x26, 0xE9,
-		0x00, 0x85, 0x9C, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
-		0x98, 0xAA, 0x88, 0xF0, 0xB1, 0x4A, 0x85, 0xA0, 0xC8, 0xA5, 0x25, 0x90,
-		0x33, 0xF1, 0x21, 0x85, 0x9B, 0xA5, 0x26, 0xE9, 0x00, 0x85, 0x9C, 0xA2,
-		0x02, 0xA0, 0x00, 0xB1, 0x9B, 0x91, 0x25, 0xC8, 0xB1, 0x9B, 0x91, 0x25,
-		0xC8, 0xB9, 0x9B, 0x00, 0x91, 0x25, 0xC0, 0x00, 0xD0, 0xF6, 0x98, 0xA0,
-		0x00, 0xB0, 0x83, 0xE6, 0x26, 0x18, 0x90, 0x84, 0xA0, 0xFF, 0x84, 0x53,
-		0xA2, 0x01, 0xD0, 0x96, 0x71, 0x21, 0x85, 0x9B, 0xC8, 0xB3, 0x21, 0x09,
-		0x80, 0x65, 0x26, 0x85, 0x9C, 0xE0, 0x80, 0x26, 0xA0, 0xA2, 0x03, 0xD0,
-		0xC4,
-	}
-
-	tgraph := tokenGraph{
-		wg:     sync.WaitGroup{},
-		mg:     sync.Mutex{},
-		ms:     sync.Mutex{},
-		me:     sync.Mutex{},
-		starts: make(map[int]bool),
-		ends:   make(map[int]bool),
-		graph:  make(map[edge]token),
-	}
-
-	ctx.sourceLen = len(src)
+func (t *tsc) crunch() []byte {
+	t.sourceLen = len(t.src)
 
 	remainder := []byte{}
 	var G = dijkstra.NewGraph()
 
-	if ctx.PRG {
-		ctx.addr = src[:2]
-		src = src[2:]
-		ctx.decrunchTo = uint16(ctx.addr[0]) + 256*uint16(ctx.addr[1])
-	}
-
-	for i := 0; i < len(src)+1; i++ {
+	for i := 0; i < len(t.src)+1; i++ {
 		G.AddVertex(i)
 	}
 
-	if ctx.INPLACE {
-		remainder = src[len(src)-1:]
-		src = src[:len(src)-1]
+	if t.options.INPLACE {
+		remainder = t.src[len(t.src)-1:]
+		t.src = t.src[:len(t.src)-1]
 	}
 
-	ctx.optimalRun = findOptimalZeroRun(src)
+	t.optimalRun = t.findOptimalZeroRun()
 
-	if ctx.usePrefixArray {
-		fillPrefixArray(src, ctx)
+	if t.usePrefixArray {
+		t.fillPrefixArray()
 	}
 
-	if !ctx.QUIET {
+	if !t.options.QUIET {
 		fmt.Print("Populating LZ layer")
 	}
-
 	tm := time.Now()
 
-	for i := 0; i < len(src); i++ {
-		tgraph.wg.Add(1)
-		go crunchAtByte(src, i, &tgraph, ctx)
+	for i := 0; i < len(t.src); i++ {
+		t.crunchAtByte(i)
 	}
-	tgraph.wg.Wait()
 
-	if !ctx.QUIET {
-		if ctx.STATS {
+	if !t.options.QUIET {
+		if t.options.STATS {
 			fmt.Println(" ...", time.Since(tm))
 		} else {
 			fmt.Println()
 		}
 	}
 
-	tgraph.starts[len(src)] = true
-	tgraph.ends[0] = true
-	starts_ := make([]int, 0, len(tgraph.starts))
-	ends_ := make([]int, 0, len(tgraph.ends))
-	for k := range tgraph.starts {
+	t.starts[len(t.src)] = true
+	t.ends[0] = true
+	starts_ := make([]int, 0, len(t.starts))
+	ends_ := make([]int, 0, len(t.ends))
+	for k := range t.starts {
 		starts_ = append(starts_, k)
 	}
-	for k := range tgraph.ends {
+	for k := range t.ends {
 		ends_ = append(ends_, k)
 	}
 
 	sort.Ints(starts_)
 	sort.Ints(ends_)
 
-	if !ctx.QUIET {
+	if !t.options.QUIET {
 		fmt.Print("Closing Gaps")
 	}
 
@@ -521,22 +524,22 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 			//bridge
 			for starts_[s]-end >= LONGESTLITERAL {
 				key := edge{end, end + LONGESTLITERAL}
-				_, haskey := tgraph.graph[key]
+				_, haskey := t.graph[key]
 				if !haskey {
 					lit := LIT(end, LONGESTLITERAL)
 					lit.size = LONGESTLITERAL
-					tgraph.graph[key] = lit
+					t.graph[key] = lit
 				}
 				end += LONGESTLITERAL
 			}
 
 			for s0 := s; s0 < len(starts_) && starts_[s0]-end < LONGESTLITERAL; s0++ {
 				key := edge{end, starts_[s0]}
-				_, haskey := tgraph.graph[key]
+				_, haskey := t.graph[key]
 				if !haskey {
 					lit := LIT(end, starts_[s0]-end)
 					lit.size = starts_[s0] - end
-					tgraph.graph[key] = lit
+					t.graph[key] = lit
 				}
 			}
 			e++
@@ -545,8 +548,8 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		}
 	}
 
-	if !ctx.QUIET {
-		if ctx.STATS {
+	if !t.options.QUIET {
+		if t.options.STATS {
 			fmt.Println(" ...", time.Since(tm))
 		} else {
 			fmt.Println()
@@ -556,12 +559,12 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 
 	tm = time.Now()
 
-	for k, t := range tgraph.graph {
+	for k, t := range t.graph {
 		G.AddArc(k.n0, k.n1, tokenCost(k.n0, k.n1, t.tokentype))
 	}
 
-	if !ctx.QUIET {
-		if ctx.STATS {
+	if !t.options.QUIET {
+		if t.options.STATS {
 			fmt.Println(" ...", time.Since(tm))
 		} else {
 			fmt.Println()
@@ -571,10 +574,10 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 
 	tm = time.Now()
 
-	best, _ := G.Shortest(0, len(src))
+	best, _ := G.Shortest(0, len(t.src))
 
-	if !ctx.QUIET {
-		if ctx.STATS {
+	if !t.options.QUIET {
+		if t.options.STATS {
 			fmt.Println(" ...", time.Since(tm))
 		} else {
 			fmt.Println()
@@ -585,17 +588,17 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 
 	for i := 0; i < len(best.Path)-1; i++ {
 		e := edge{best.Path[i], best.Path[i+1]}
-		token_list = append(token_list, tgraph.graph[e])
+		token_list = append(token_list, t.graph[e])
 	}
 
-	if ctx.INPLACE {
+	if t.options.INPLACE {
 		safety := len(token_list)
 		segment_uncrunched_size := 0
 		segment_crunched_size := 0
 		total_uncrunched_size := 0
 		for i := len(token_list) - 1; i >= 0; i-- {
-			segment_crunched_size += len(tokenPayload(src, token_list[i])) //token size
-			segment_uncrunched_size += token_list[i].size                  //decrunched token raw size
+			segment_crunched_size += len(t.tokenPayload(token_list[i])) //token size
+			segment_uncrunched_size += token_list[i].size               //decrunched token raw size
 			if segment_uncrunched_size <= segment_crunched_size+0 {
 				safety = i
 				total_uncrunched_size += segment_uncrunched_size
@@ -603,31 +606,32 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 				segment_crunched_size = 0
 			}
 		}
-		for _, t := range token_list[:safety] {
-			crunched = append(crunched, tokenPayload(src, t)...)
+		for _, v := range token_list[:safety] {
+			crunched = append(crunched, t.tokenPayload(v)...)
 		}
 		if total_uncrunched_size > 0 {
-			remainder = append(src[len(src)-total_uncrunched_size:], remainder...)
+			remainder = append(t.src[len(t.src)-total_uncrunched_size:], remainder...)
 		}
 		crunched = append(crunched, TERMINATOR)
 		crunched = append(crunched, remainder[1:]...)
 		crunched = append(remainder[:1], crunched...)
-		crunched = append([]byte{byte(ctx.optimalRun - 1)}, crunched...)
-		crunched = append(ctx.addr, crunched...)
+		crunched = append([]byte{byte(t.optimalRun - 1)}, crunched...)
+		crunched = append(t.options.addr, crunched...)
 
 	} else {
-		for _, t := range token_list {
-			crunched = append(crunched, tokenPayload(src, t)...)
+		for _, v := range token_list {
+			crunched = append(crunched, t.tokenPayload(v)...)
 		}
 		crunched = append(crunched, TERMINATOR)
-		if !ctx.SFX {
-			crunched = append([]byte{byte(ctx.optimalRun - 1)}, crunched...)
+		if !t.options.SFX {
+			crunched = append([]byte{byte(t.optimalRun - 1)}, crunched...)
 		}
 	}
 
-	ctx.crunchedSize = len(crunched)
+	t.crunchedSize = len(crunched)
 
-	if ctx.SFX {
+	if t.options.SFX {
+		boot := newBoot()
 		fileLen := len(boot) + len(crunched)
 		startAddress := 0x10000 - len(crunched)
 		transfAddress := fileLen + 0x6ff
@@ -638,105 +642,35 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		boot[0x3c] = byte(startAddress & 0xff) //Depack from..
 		boot[0x3d] = byte(startAddress >> 8)
 
-		boot[0x40] = byte(ctx.decrunchTo & 0xff) //decrunch to..
-		boot[0x41] = byte(ctx.decrunchTo >> 8)
+		boot[0x40] = byte(t.options.decrunchTo & 0xff) //decrunch to..
+		boot[0x41] = byte(t.options.decrunchTo >> 8)
 
-		boot[0x77] = byte(ctx.jmp & 0xff) // Jump to..
-		boot[0x78] = byte(ctx.jmp >> 8)
+		boot[0x77] = byte(t.options.jmp & 0xff) // Jump to..
+		boot[0x78] = byte(t.options.jmp >> 8)
 
-		boot[0xc9] = byte(ctx.optimalRun - 1)
+		boot[0xc9] = byte(t.optimalRun - 1)
 
 		crunched = append(boot, crunched...)
 
-		ctx.crunchedSize += len(boot)
-		ctx.loadTo = 0x0801
+		t.crunchedSize += len(boot)
+		t.options.loadTo = 0x0801
 	}
 
-	ctx.decrunchEnd = uint16(int(ctx.decrunchTo) + len(src) - 1)
+	t.decrunchEnd = uint16(int(t.options.decrunchTo) + len(t.src) - 1)
 
-	if ctx.INPLACE {
-		ctx.loadTo = ctx.decrunchEnd - uint16(len(crunched)) + 1
-		crunched = append([]byte{byte(ctx.loadTo & 255), byte(ctx.loadTo >> 8)}, crunched...)
+	if t.options.INPLACE {
+		t.options.loadTo = t.decrunchEnd - uint16(len(crunched)) + 1
+		crunched = append([]byte{byte(t.options.loadTo & 255), byte(t.options.loadTo >> 8)}, crunched...)
 	}
 
 	return crunched
 }
 
-func usage() {
-	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
-	fmt.Println("Usage: tscrunch [-p] [-i] [-q] [-x $addr] infile outfile")
-	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
-	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
-	fmt.Println(" -i  : inplace crunching (forces -p)")
-	fmt.Println(" -q  : quiet mode")
-}
+//go:embed "boot.prg"
+var bootPrg []byte
 
-func main() {
-	ctx := crunchCtx{
-		//prefix arrays for efficient prefix search don't really improve performance, here
-		//due to the small search window.
-		usePrefixArray: true,
-		STATS:          true,
-	}
-
-	var jmp_str string
-	flag.BoolVar(&ctx.PRG, "p", false, "")
-	flag.BoolVar(&ctx.QUIET, "q", false, "")
-	flag.BoolVar(&ctx.INPLACE, "i", false, "")
-	flag.StringVar(&jmp_str, "x", "", "")
-	flag.Usage = usage
-	flag.Parse()
-
-	if jmp_str != "" {
-		ctx.SFX = true
-		ctx.PRG = true
-	}
-
-	if ctx.INPLACE {
-		ctx.PRG = true
-	}
-
-	if flag.NArg() != 2 {
-		usage()
-		os.Exit(2)
-	}
-
-	if ctx.SFX {
-		if jmp_str[0] == '$' {
-			jmp, err := strconv.ParseUint(jmp_str[1:], 16, 16)
-			if err == nil {
-				ctx.jmp = uint16(jmp)
-			}
-		}
-		if ctx.jmp == 0 {
-			usage()
-			os.Exit(2)
-		}
-	}
-
-	ifidx := flag.NArg() - 2
-	ofidx := flag.NArg() - 1
-
-	src := load_raw(flag.Args()[ifidx])
-
-	crunched := crunch(src, &ctx)
-
-	save_raw(flag.Args()[ofidx], crunched)
-
-	if !ctx.QUIET {
-		ratio := (float32(ctx.crunchedSize) * 100.0 / float32(ctx.sourceLen))
-		prg := "RAW"
-		dest_prg := "RAW"
-		if ctx.PRG {
-			prg = "PRG"
-		}
-		if ctx.SFX || ctx.INPLACE {
-			dest_prg = "prg"
-		}
-		fmt.Printf("Input file  %s: %s, $%04x - $%04x : %d bytes\n",
-			prg, flag.Args()[ifidx], ctx.decrunchTo, ctx.decrunchEnd, ctx.sourceLen)
-		fmt.Printf("Output file %s: %s, $%04x - $%04x : %d bytes\n",
-			dest_prg, flag.Args()[ofidx], ctx.loadTo, ctx.crunchedSize+int(ctx.loadTo)-1, ctx.crunchedSize)
-		fmt.Printf("Crunched to %.2f%% of original size\n", ratio)
-	}
+func newBoot() []byte {
+	boot := make([]byte, len(bootPrg))
+	copy(boot, bootPrg)
+	return boot
 }
