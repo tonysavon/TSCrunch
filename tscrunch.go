@@ -155,7 +155,7 @@ func (t *tsc) WriteTo(w io.Writer) (int64, error) {
 		fmt.Printf("crunched to %.2f%% of original size\n", ratio)
 	}
 
-	return int64(n), err
+	return int64(n), nil
 }
 
 func min(x, y int) int {
@@ -229,8 +229,7 @@ func (t *tsc) findall(prefix []byte, i int, minlz int) <-chan int {
 
 func (t *tsc) findOptimalZeroRun() int {
 	zeroruns := make(map[int]int)
-	var i = 0
-	var j = 0
+	var i, j int
 	for i < len(t.src)-1 {
 		if t.src[i] == 0 {
 			j = i + 1
@@ -245,20 +244,19 @@ func (t *tsc) findOptimalZeroRun() int {
 			i += 1
 		}
 	}
-	if len(zeroruns) > 0 {
-		bestrun := 0
-		bestvalue := 0.0
-		for key, amount := range zeroruns {
-			currentvalue := float64(key) * math.Pow(float64(amount), 1.1)
-			if currentvalue > bestvalue {
-				bestrun = key
-				bestvalue = currentvalue
-			}
-		}
-		return bestrun
-	} else {
+	if len(zeroruns) < 1 {
 		return LONGESTRLE
 	}
+	bestrun := 0
+	bestvalue := 0.0
+	for key, amount := range zeroruns {
+		currentvalue := float64(key) * math.Pow(float64(amount), 1.1)
+		if currentvalue > bestvalue {
+			bestrun = key
+			bestvalue = currentvalue
+		}
+	}
+	return bestrun
 }
 
 func tokenCost(n0, n1 int, t byte) int64 {
@@ -284,32 +282,34 @@ func tokenCost(n0, n1 int, t byte) int64 {
 }
 
 func (ts *tsc) tokenPayload(t token) []byte {
-
 	n0 := t.i
 	n1 := t.i + t.size
 
-	if t.tokentype == LZID {
+	switch t.tokentype {
+	case LZID:
 		return []byte{byte(LZMASK | (((t.size - 1) << 2) & 0x7f) | 2), byte(t.offset & 0xff)}
-	} else if t.tokentype == LONGLZID {
+	case LONGLZID:
 		negoffset := (0 - t.offset)
 		return []byte{byte(LZMASK | (((t.size-1)>>1)<<2)&0x7f), byte(negoffset & 0xff), byte(((negoffset >> 8) & 0x7f) | (((t.size - 1) & 1) << 7))}
-	} else if t.tokentype == RLEID {
+	case RLEID:
 		return []byte{RLEMASK | byte(((t.size-1)<<1)&0x7f), t.rlebyte}
-	} else if t.tokentype == ZERORUNID {
+	case ZERORUNID:
 		return []byte{RLEMASK}
-	} else if t.tokentype == LZ2ID {
+	case LZ2ID:
 		return []byte{LZ2MASK | byte(0x7f-t.offset)}
-	} else {
+	default:
 		return append([]byte{byte(LITERALMASK | t.size)}, ts.src[n0:n1]...)
 	}
 }
 
 func (t *tsc) LZ(i int, size int, offset int, minlz int) token {
-	var lz token
-	lz.tokentype = LZID
-	lz.i = i
+	lz := token{
+		tokentype: LZID,
+		i:         i,
+		size:      size,
+		offset:    offset,
+	}
 	if i >= 0 {
-
 		bestpos := i - 1
 		bestlen := 0
 
@@ -328,9 +328,6 @@ func (t *tsc) LZ(i int, size int, offset int, minlz int) token {
 		}
 		lz.size = bestlen
 		lz.offset = i - bestpos
-	} else {
-		lz.size = size
-		lz.offset = offset
 	}
 	if lz.size > LONGESTLZ || lz.offset >= 256 {
 		lz.tokentype = LONGLZID
@@ -339,31 +336,31 @@ func (t *tsc) LZ(i int, size int, offset int, minlz int) token {
 }
 
 func (t *tsc) RLE(i int, size int, rlebyte byte) token {
-	var rle token
-	rle.tokentype = RLEID
-	rle.i = i
-	if i >= 0 {
-		rle.rlebyte = t.src[i]
-		x := 0
-		for i+x < len(t.src) && x < LONGESTRLE && t.src[i+x] == t.src[i] {
-			x++
-		}
-		rle.size = x
-	} else {
+	rle := token{
+		tokentype: RLEID,
+		i:         i,
+	}
+	if i < 0 {
 		rle.size = size
 		rle.rlebyte = rlebyte
+		return rle
 	}
+	rle.rlebyte = t.src[i]
+	x := 0
+	for i+x < len(t.src) && x < LONGESTRLE && t.src[i+x] == t.src[i] {
+		x++
+	}
+	rle.size = x
 	return rle
 }
 
 func (t *tsc) ZERORUN(i int) token {
-	var zero token
-	zero.tokentype = ZERORUNID
-
-	zero.i = i
-	zero.rlebyte = 0
-	zero.size = 0
-
+	zero := token{
+		tokentype: ZERORUNID,
+		i:         i,
+		rlebyte:   0,
+		size:      0,
+	}
 	if i >= 0 {
 		var x int
 		for x = 0; x < t.optimalRun && i+x < len(t.src) && t.src[i+x] == 0; x++ {
@@ -376,36 +373,35 @@ func (t *tsc) ZERORUN(i int) token {
 }
 
 func (t *tsc) LZ2(i int, size int, offset int) token {
-	var lz2 token
-	lz2.tokentype = LZ2ID
-
-	lz2.offset = -1
-	lz2.size = -1
-	lz2.i = i
-
-	if i >= 0 {
-		if i+2 < len(t.src) {
-			leftbound := max(0, i-LZ2OFFSET)
-			lpart := t.src[leftbound : i+1]
-			o := bytes.LastIndex(lpart, t.src[i:i+2])
-			if o >= 0 {
-				lz2.offset = i - (o + leftbound)
-				lz2.size = 2
-			}
-		}
-	} else {
+	lz2 := token{
+		tokentype: LZ2ID,
+		offset:    -1,
+		size:      -1,
+		i:         i,
+	}
+	if i < 0 {
 		lz2.size = size
 		lz2.offset = offset
+		return lz2
+	}
+	if i+2 < len(t.src) {
+		leftbound := max(0, i-LZ2OFFSET)
+		lpart := t.src[leftbound : i+1]
+		o := bytes.LastIndex(lpart, t.src[i:i+2])
+		if o >= 0 {
+			lz2.offset = i - (o + leftbound)
+			lz2.size = 2
+		}
 	}
 	return lz2
 }
 
 func LIT(i int, size int) token {
-	var lit token
-	lit.tokentype = LITERALID
-	lit.size = size
-	lit.i = i
-	return lit
+	return token{
+		tokentype: LITERALID,
+		size:      size,
+		i:         i,
+	}
 }
 
 //func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
@@ -493,10 +489,9 @@ func (t *tsc) crunch() []byte {
 
 	if !t.options.QUIET {
 		if t.options.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
+			fmt.Print(" ...", time.Since(tm))
 		}
+		fmt.Println()
 	}
 
 	t.starts[len(t.src)] = true
@@ -550,10 +545,9 @@ func (t *tsc) crunch() []byte {
 
 	if !t.options.QUIET {
 		if t.options.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
+			fmt.Print(" ...", time.Since(tm))
 		}
+		fmt.Println()
 		fmt.Print("Populating Graph")
 	}
 
@@ -578,10 +572,9 @@ func (t *tsc) crunch() []byte {
 
 	if !t.options.QUIET {
 		if t.options.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
+			fmt.Print(" ...", time.Since(tm))
 		}
+		fmt.Println()
 	}
 	crunched := make([]byte, 0)
 	token_list := make([]token, 0)
