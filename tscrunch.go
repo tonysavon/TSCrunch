@@ -279,7 +279,7 @@ func RLE(src []byte, i int, size int, rlebyte byte) token {
 	if i >= 0 {
 		rle.rlebyte = src[i]
 		x := 0
-		for i+x < len(src) && x < LONGESTRLE && src[i+x] == src[i] {
+		for i+x < len(src) && x < LONGESTRLE+1 && src[i+x] == src[i] {
 			x++
 		}
 		rle.size = x
@@ -344,22 +344,23 @@ func LIT(i int, size int) token {
 
 func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 	rle := RLE(src, i, 0, 0)
+	rlesize := min(rle.size, LONGESTRLE)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE size
 	var lz token
-	if rle.size < LONGESTLONGLZ-1 {
-		lz = LZ(src, i, 0, 0, rle.size+1, ctx)
+	if rlesize < LONGESTLONGLZ-1 {
+		lz = LZ(src, i, 0, 0, rlesize+1, ctx)
 	} else {
 		lz = LZ(src, -1, -1, -1, -1, ctx) // start with a dummy lz
 	}
 
-	if lz.size >= MINLZ || rle.size >= MINRLE {
+	if lz.size >= MINLZ || rlesize >= MINRLE {
 		tg.ms.Lock()
 		tg.starts[i] = true
 		tg.ms.Unlock()
 	}
 
-	for size := lz.size; size >= MINLZ && size > rle.size; size-- {
+	for size := lz.size; size >= MINLZ && size > rlesize; size-- {
 		tg.me.Lock()
 		tg.ends[i+size] = true
 		tg.me.Unlock()
@@ -369,16 +370,25 @@ func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 		tg.mg.Unlock()
 	}
 
-	for size := rle.size; size >= MINRLE; size-- {
+	if rle.size > LONGESTRLE {
 		tg.me.Lock()
-		tg.ends[i+size] = true
+		tg.ends[i+LONGESTRLE] = true
 		tg.me.Unlock()
 
 		tg.mg.Lock()
-		tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
+		tg.graph[edge{i, i + LONGESTRLE}] = RLE(src, -1, LONGESTRLE, src[i])
 		tg.mg.Unlock()
-	}
+	} else {
+		for size := rle.size; size >= MINRLE; size-- {
+			tg.me.Lock()
+			tg.ends[i+size] = true
+			tg.me.Unlock()
 
+			tg.mg.Lock()
+			tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
+			tg.mg.Unlock()
+		}
+	}
 	if len(src)-i > 2 {
 		lz2 := LZ2(src, i, 0, 0)
 		if lz2.size == 2 {

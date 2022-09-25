@@ -142,7 +142,7 @@ class RLE(Token):
 		
 		elif size == None:
 			x = 0
-			while i + x < len(src) and x < LONGESTRLE and src[i + x] == src[i]:
+			while i + x < len(src) and x < LONGESTRLE + 1 and src[i + x] == src[i]:
 				x+=1
 			self.size = x
 		else:
@@ -282,24 +282,30 @@ class Cruncher:
 				progress(progress_string,i,len(src))
 			lz2 = None
 			rle = RLE(src,i)
-			
+			rlesize = min(rle.size,LONGESTRLE)
 			#don't compute prefix for same bytes or this will explode
 			#start computing for prefixes larger than RLE
-			if rle.size < LONGESTLONGLZ - 1:	
-				lz = LZ(src,i, minlz = rle.size + 1)
+			if rlesize < LONGESTLONGLZ - 1:	
+				lz = LZ(src,i, minlz = rlesize + 1)
 			else:
 				lz = LZ(src,i,size = 1) #start with a dummy LZ
 
-			if lz.size >= MINLZ or rle.size >= MINRLE:
+			if lz.size >= MINLZ or rlesize >= MINRLE:
 				starts.add(i)
-			while lz.size >= MINLZ and lz.size > rle.size:
+			while lz.size >= MINLZ and lz.size > rlesize:
 				ends.add(i+lz.size)
 				self.graph[(i,i+lz.size)] = lz
 				lz = LZ(src, i, size = lz.size - 1, offset = lz.offset)
-			while rle.size >= MINRLE:
-				ends.add(i+rle.size)
-				self.graph[(i,i+rle.size)] = rle
-				rle = RLE(src, i, rle.size - 1)
+			
+			if rle.size > LONGESTRLE: # == 2 * LONGESTRLE:
+				rle = RLE(src, i, LONGESTRLE)
+				ends.add(i+LONGESTRLE)
+				self.graph[(i,i+LONGESTRLE)] = rle
+			else:
+				while rle.size >= MINRLE:
+					ends.add(i+rle.size)
+					self.graph[(i,i+rle.size)] = rle
+					rle = RLE(src, i, rle.size - 1)
 	
 			lz2 = LZ2(src,i)
 			if lz2.offset > 0:
