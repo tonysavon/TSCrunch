@@ -16,18 +16,19 @@ import (
 
 func usage() {
 	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
-	fmt.Println("Usage: tscrunch [-p] [-i] [-q] [-x $addr] infile outfile")
+	fmt.Println("Usage: tscrunch [-p] [-i] [-f] [-q] [-x $addr] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
 	fmt.Println(" -i  : inplace crunching (forces -p)")
 	fmt.Println(" -q  : quiet mode")
+	fmt.Println(" -f  : fast mode")
 }
 
 func main() {
 	if err := run(); err != nil {
 		log.Printf("error: %v\n", err)
 		usage()
-		os.Exit(1)
+		return
 	}
 }
 
@@ -39,6 +40,7 @@ func run() error {
 	flag.BoolVar(&opt.PRG, "p", false, "")
 	flag.BoolVar(&opt.QUIET, "q", false, "")
 	flag.BoolVar(&opt.INPLACE, "i", false, "")
+	flag.BoolVar(&opt.SkipRLE, "f", false, "")
 	flag.StringVar(&opt.JumpTo, "x", "", "")
 	flag.Usage = usage
 	flag.Parse()

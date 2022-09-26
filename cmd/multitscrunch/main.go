@@ -15,15 +15,15 @@ import (
 func usage() {
 	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
 	fmt.Println("Multi-hack by burg, quickly compile multiple files")
-	fmt.Println("Usage: tscrunch [-p] [-i] [-q] infile infile infile")
+	fmt.Println("Usage: tscrunch [-p] [-i] [-f] [-q] infile infile infile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -i  : inplace crunching (forces -p)")
 	fmt.Println(" -q  : quiet mode")
+	fmt.Println(" -f  : fast mode")
 }
 
 func main() {
-	err := run()
-	if err != nil {
+	if err := run(); err != nil {
 		log.Printf("error: %v\n", err)
 		usage()
 		return
@@ -32,12 +32,13 @@ func main() {
 
 func run() error {
 	t0 := time.Now()
-	opt := TSCrunch.Options{SkipRLE: true}
+	opt := TSCrunch.Options{}
 	var cpuProfile string
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "write cpu profile to `file`")
 	flag.BoolVar(&opt.PRG, "p", false, "")
 	flag.BoolVar(&opt.QUIET, "q", false, "")
 	flag.BoolVar(&opt.INPLACE, "i", false, "")
+	flag.BoolVar(&opt.SkipRLE, "f", false, "")
 	flag.Usage = usage
 	flag.Parse()
 
