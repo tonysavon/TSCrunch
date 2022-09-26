@@ -26,7 +26,7 @@ func main() {
 	if err != nil {
 		log.Printf("error: %v\n", err)
 		usage()
-		os.Exit(1)
+		return
 	}
 }
 
