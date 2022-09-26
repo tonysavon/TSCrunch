@@ -32,7 +32,7 @@ func main() {
 
 func run() error {
 	t0 := time.Now()
-	opt := TSCrunch.Options{}
+	opt := TSCrunch.Options{SkipRLE: true}
 	var cpuProfile string
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "write cpu profile to `file`")
 	flag.BoolVar(&opt.PRG, "p", false, "")

@@ -426,22 +426,23 @@ func (t *tsc) crunchAtByte(i int) int {
 		t.ends[i+size] = true
 	}
 
-	/*
-		// this part of the RLE implementation consumes tons of RAM, shouldnt need to store all
+	skip := 0
+	if t.options.SkipRLE {
+		// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
+		// skipping identical bytes in this RLE block improves crunchtime, but impact on file size is big.
+		if rle.size >= MINRLE {
+			t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
+			t.ends[i+rle.size] = true
+			t.graph[edge{i, i + MINRLE}] = t.RLE(-1, MINRLE, t.src[i])
+			t.ends[i+MINRLE] = true
+			skip = rle.size - 1
+		}
+	} else {
+		// this part of the original RLE implementation consumes tons of RAM and CPU.
 		for size := rle.size; size >= MINRLE; size-- {
 			t.graph[edge{i, i + size}] = t.RLE(-1, size, t.src[i])
 			t.ends[i+size] = true
 		}
-	*/
-	// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
-	// skipping the bytes in this block improves crunchtime, but impact on file size is big.
-	skip := 0
-	if rle.size >= MINRLE {
-		t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
-		t.ends[i+rle.size] = true
-		t.graph[edge{i, i + MINRLE}] = t.RLE(-1, MINRLE, t.src[i])
-		t.ends[i+MINRLE] = true
-		skip = rle.size - 1
 	}
 
 	if len(t.src)-i > 2 {
@@ -489,10 +490,7 @@ func (t *tsc) crunch() []byte {
 	tm := time.Now()
 
 	for i := 0; i < len(t.src); i++ {
-		j := t.crunchAtByte(i)
-		if t.options.SkipRLE {
-			i += j
-		}
+		i += t.crunchAtByte(i)
 	}
 
 	if !t.options.QUIET {
