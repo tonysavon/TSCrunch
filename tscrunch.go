@@ -24,6 +24,7 @@ type Options struct {
 	SFX        bool
 	INPLACE    bool
 	STATS      bool
+	SkipRLE    bool // skipping RLE ranges drastically improves crunch time at the cost of pack-ratio.
 	JumpTo     string
 	jmp        uint16
 	decrunchTo uint16
@@ -405,7 +406,7 @@ func LIT(i int, size int) token {
 }
 
 //func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
-func (t *tsc) crunchAtByte(i int) {
+func (t *tsc) crunchAtByte(i int) int {
 	rle := t.RLE(i, 0, 0)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE size
@@ -433,11 +434,14 @@ func (t *tsc) crunchAtByte(i int) {
 		}
 	*/
 	// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
+	// skipping the bytes in this block improves crunchtime, but impact on file size is big.
+	skip := 0
 	if rle.size >= MINRLE {
 		t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
 		t.ends[i+rle.size] = true
 		t.graph[edge{i, i + MINRLE}] = t.RLE(-1, MINRLE, t.src[i])
 		t.ends[i+MINRLE] = true
+		skip = rle.size - 1
 	}
 
 	if len(t.src)-i > 2 {
@@ -455,6 +459,7 @@ func (t *tsc) crunchAtByte(i int) {
 		t.starts[i] = true
 		t.ends[i+t.optimalRun] = true
 	}
+	return skip
 }
 
 func (t *tsc) crunch() []byte {
@@ -484,7 +489,10 @@ func (t *tsc) crunch() []byte {
 	tm := time.Now()
 
 	for i := 0; i < len(t.src); i++ {
-		t.crunchAtByte(i)
+		j := t.crunchAtByte(i)
+		if t.options.SkipRLE {
+			i += j
+		}
 	}
 
 	if !t.options.QUIET {
