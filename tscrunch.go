@@ -119,15 +119,20 @@ func New(opt Options, r io.Reader) (*tsc, error) {
 		starts:  make(map[int]bool, 0xffff),
 		ends:    make(map[int]bool, 0xffff),
 		graph:   make(map[edge]token, 0xffff),
-		//prefix arrays for efficient prefix search don't really improve performance, here
-		//due to the small search window.
+		// prefix arrays improve crunch performance 3x
+		// 19 prgs sequential, usePrefixArray:
+		// true:  0.89 sec
+		// false: 2.97 sec
 		usePrefixArray: true,
 	}
 	return t, nil
 }
 
 func (t *tsc) WriteTo(w io.Writer) (int64, error) {
-	buf := t.crunch()
+	buf, err := t.crunch()
+	if err != nil {
+		return 0, fmt.Errorf("t.crunch failed: %w", err)
+	}
 	decrunchEnd := uint16(int(t.options.decrunchTo) + len(t.src) - 1)
 	if t.options.INPLACE {
 		t.options.loadTo = decrunchEnd - uint16(len(buf)) + 1
@@ -429,7 +434,8 @@ func (t *tsc) crunchAtByte(i int) int {
 	skip := 0
 	if t.options.SkipRLE {
 		// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
-		// skipping identical bytes in this RLE block improves crunchtime, but impact on file size is big.
+		// skipping identical bytes in this RLE block improves crunchtime, but impact on file size is big
+		// worst case was 200 bytes extra for me
 		if rle.size >= MINRLE {
 			t.graph[edge{i, i + rle.size}] = t.RLE(-1, rle.size, t.src[i])
 			t.ends[i+rle.size] = true
@@ -438,7 +444,7 @@ func (t *tsc) crunchAtByte(i int) int {
 			skip = rle.size - 1
 		}
 	} else {
-		// this part of the original RLE implementation consumes tons of RAM and CPU.
+		// the original RLE implementation consumes tons of RAM and CPU, but is more efficient in packratio
 		for size := rle.size; size >= MINRLE; size-- {
 			t.graph[edge{i, i + size}] = t.RLE(-1, size, t.src[i])
 			t.ends[i+size] = true
@@ -463,16 +469,14 @@ func (t *tsc) crunchAtByte(i int) int {
 	return skip
 }
 
-func (t *tsc) crunch() []byte {
+func (t *tsc) crunch() ([]byte, error) {
 	t.sourceLen = len(t.src)
-
-	remainder := []byte{}
-	var G = dijkstra.NewGraph()
-
+	G := dijkstra.NewGraph()
 	for i := 0; i < len(t.src)+1; i++ {
 		G.AddVertex(i)
 	}
 
+	remainder := []byte{}
 	if t.options.INPLACE {
 		remainder = t.src[len(t.src)-1:]
 		t.src = t.src[:len(t.src)-1]
@@ -521,32 +525,32 @@ func (t *tsc) crunch() []byte {
 	e, s := 0, 0
 	for e < len(ends_) && s < len(starts_) {
 		end := ends_[e]
-		if end < starts_[s] {
-			//bridge
-			for starts_[s]-end >= LONGESTLITERAL {
-				key := edge{end, end + LONGESTLITERAL}
-				_, haskey := t.graph[key]
-				if !haskey {
-					lit := LIT(end, LONGESTLITERAL)
-					lit.size = LONGESTLITERAL
-					t.graph[key] = lit
-				}
-				end += LONGESTLITERAL
-			}
-
-			for s0 := s; s0 < len(starts_) && starts_[s0]-end < LONGESTLITERAL; s0++ {
-				key := edge{end, starts_[s0]}
-				_, haskey := t.graph[key]
-				if !haskey {
-					lit := LIT(end, starts_[s0]-end)
-					lit.size = starts_[s0] - end
-					t.graph[key] = lit
-				}
-			}
-			e++
-		} else {
+		if end >= starts_[s] {
 			s++
+			continue
 		}
+		//bridge
+		for starts_[s]-end >= LONGESTLITERAL {
+			key := edge{end, end + LONGESTLITERAL}
+			_, haskey := t.graph[key]
+			if !haskey {
+				lit := LIT(end, LONGESTLITERAL)
+				lit.size = LONGESTLITERAL
+				t.graph[key] = lit
+			}
+			end += LONGESTLITERAL
+		}
+
+		for s0 := s; s0 < len(starts_) && starts_[s0]-end < LONGESTLITERAL; s0++ {
+			key := edge{end, starts_[s0]}
+			_, haskey := t.graph[key]
+			if !haskey {
+				lit := LIT(end, starts_[s0]-end)
+				lit.size = starts_[s0] - end
+				t.graph[key] = lit
+			}
+		}
+		e++
 	}
 
 	if !t.options.QUIET {
@@ -560,21 +564,24 @@ func (t *tsc) crunch() []byte {
 	tm = time.Now()
 
 	for k, t := range t.graph {
-		G.AddArc(k.n0, k.n1, tokenCost(k.n0, k.n1, t.tokentype))
+		if err := G.AddArc(k.n0, k.n1, tokenCost(k.n0, k.n1, t.tokentype)); err != nil {
+			return nil, fmt.Errorf("G.AddArc failed: %w", err)
+		}
 	}
 
 	if !t.options.QUIET {
 		if t.options.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
+			fmt.Print(" ...", time.Since(tm))
 		}
+		fmt.Println()
 		fmt.Print("Computing shortest path")
 	}
 
 	tm = time.Now()
-
-	best, _ := G.Shortest(0, len(t.src))
+	best, err := G.Shortest(0, len(t.src))
+	if err != nil {
+		return nil, fmt.Errorf("G.Shortest failed: %w", err)
+	}
 
 	if !t.options.QUIET {
 		if t.options.STATS {
@@ -662,7 +669,7 @@ func (t *tsc) crunch() []byte {
 		crunched = append([]byte{byte(t.options.loadTo & 255), byte(t.options.loadTo >> 8)}, crunched...)
 	}
 
-	return crunched
+	return crunched, nil
 }
 
 //go:embed "boot.prg"
