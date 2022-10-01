@@ -18,13 +18,15 @@ import (
 	"github.com/RyanCarrier/dijkstra"
 )
 
+const Version = "1.3"
+
 type Options struct {
 	QUIET      bool
 	PRG        bool
 	SFX        bool
 	INPLACE    bool
 	STATS      bool
-	SkipRLE    bool // skipping RLE ranges drastically improves crunch time at the cost of pack-ratio.
+	Fast       bool // skipping RLE ranges drastically improves crunch time at the cost of pack-ratio.
 	JumpTo     string
 	jmp        uint16
 	decrunchTo uint16
@@ -432,7 +434,7 @@ func (t *tsc) crunchAtByte(i int) int {
 	}
 
 	skip := 0
-	if t.options.SkipRLE {
+	if t.options.Fast {
 		// using this more efficient one-shot, it looks like we use a couple bytes more in resulting .prg
 		// skipping identical bytes in this RLE block improves crunchtime, but impact on file size is big
 		// worst case was 200 bytes extra for me

@@ -15,7 +15,8 @@ import (
 )
 
 func usage() {
-	fmt.Println("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
+	fmt.Printf("TSCrunch %s - binary cruncher, by Antonio Savona\n", TSCrunch.Version)
+	fmt.Println("Fast mode by burg")
 	fmt.Println("Usage: tscrunch [-p] [-i] [-f] [-q] [-x $addr] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
@@ -34,13 +35,13 @@ func main() {
 
 func run() error {
 	t0 := time.Now()
-	opt := TSCrunch.Options{STATS: true, SkipRLE: true}
+	opt := TSCrunch.Options{STATS: true}
 	var cpuProfile string
 	flag.StringVar(&cpuProfile, "cpuprofile", "", "write cpu profile to `file`")
 	flag.BoolVar(&opt.PRG, "p", false, "")
 	flag.BoolVar(&opt.QUIET, "q", false, "")
 	flag.BoolVar(&opt.INPLACE, "i", false, "")
-	flag.BoolVar(&opt.SkipRLE, "f", false, "")
+	flag.BoolVar(&opt.Fast, "f", false, "")
 	flag.StringVar(&opt.JumpTo, "x", "", "")
 	flag.Usage = usage
 	flag.Parse()
