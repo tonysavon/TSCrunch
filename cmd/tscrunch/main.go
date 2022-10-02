@@ -1,5 +1,6 @@
 /*
 TSCrunch binary cruncher, by Antonio Savona
+fast mode hack by burg
 */
 package main
 
@@ -69,7 +70,6 @@ func run() error {
 		return err
 	}
 	defer in.Close()
-	opt.STATS = true
 	t, err := TSCrunch.New(opt, in)
 	if err != nil {
 		return err

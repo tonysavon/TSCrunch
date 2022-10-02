@@ -1,3 +1,7 @@
+/*
+TSCrunch binary cruncher, by Antonio Savona
+fast mode and multi hack by burg
+*/
 package main
 
 import (
