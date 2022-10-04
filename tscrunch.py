@@ -12,7 +12,7 @@ PRG				=	False
 SFX 			=	False
 INPLACE			=	False
 
-DEBUG = False
+DEBUG 			= 	False
 
 LONGESTRLE		=	64
 LONGESTLONGLZ	=	64 
@@ -20,7 +20,8 @@ LONGESTLZ 		=	32
 LONGESTLITERAL	=	31
 MINRLE			=	2
 MINLZ			=	3
-LZOFFSET		=	32767
+LZOFFSET 		=	256
+LONGLZOFFSET	=	32767
 LZ2OFFSET 		=	94
 
 RLEMASK 		= 	0x81
@@ -71,24 +72,24 @@ def load_raw(fi):
 
 def save_raw(fo, data):
 	fo.write(bytes(data))
-	
-#finds all the occurrences of prefix in the range [max(0,i - LZOFFSET),i) 	
+
+#finds all the occurrences of prefix in the range [max(0,i - LONGLZOFFSET) i) 	
 #the search window is quite small, so brute force here performs as well as suffix trees
-def findall(data,prefix,i,minlz = MINLZ):
-	x0 = max(0,i - LZOFFSET)
+def findall(data, prefix, i, minlz = MINLZ):
+	x0 = max(0, i - LONGLZOFFSET)
 	x1 = min(i + minlz - 1, len(data))
 	f = 1
 	while f >= 0:
-		f = data.rfind(prefix,x0,x1)
+		f = data.rfind(prefix, x0, x1)
 		if f >= 0:
 			yield f
 			x1 = f + minlz - 1
 	
 #pretty prints a progress bar	
-def progress(description,current,total):
-	percentage = 100 *current // total
+def progress(description, current, total):
+	percentage = 100 * current // total
 	tchars = 16 * current // total
-	sys.stdout.write("\r%s [%s%s]%02d%%" %(description,'*'*tchars, ' '*(16-tchars), percentage))
+	sys.stdout.write("\r%s [%s%s]%02d%%" %(description, '*'*tchars, ' '*(16-tchars), percentage))
 	
 	
 def findOptimalZero(src):
@@ -101,23 +102,24 @@ def findOptimalZero(src):
 			while j < len(src) and src[j] == 0 and j-i < 256:
 				j+=1
 			if j - i >= MINRLE:
-				zeroruns[j-i] = zeroruns.get(j-i,0) + 1	
+				zeroruns[j-i] = zeroruns.get(j-i, 0) + 1	
 			i = j
 		else:
 			i+=1
 	
 	if len(zeroruns) > 0:
-		return 	min(list(zeroruns.items()),key = lambda x:-x[0]*(x[1]**1.1))[0]
+		return 	min(list(zeroruns.items()), key = lambda x:-x[0]*(x[1]**1.1))[0]
 	else: 
 		return LONGESTRLE	
 	
+	
 class Token:
-	def __init__(self,src = None):
+	def __init__(self, src = None):
 		self.type = None
 
 
 class ZERORUN(Token):
-	def __init__(self,src,i,size = LONGESTRLE, token = None):
+	def __init__(self, src, i, size = LONGESTRLE, token = None):
 		self.type = ZERORUNID
 		self.size = size
 		if token != None:
@@ -133,7 +135,7 @@ class ZERORUN(Token):
 		return [RLEMASK]
 	
 class RLE(Token):
-	def __init__(self,src,i,size = None, token = None):
+	def __init__(self, src, i, size = None, token = None):
 		self.type = RLEID
 		self.rleByte = src[i]
 		
@@ -156,7 +158,7 @@ class RLE(Token):
 	
 	
 class LZ(Token):
-	def __init__(self,src,i, size = None, offset = None, minlz = MINLZ, token = None):
+	def __init__(self, src, i, size = None, offset = None, minlz = MINLZ, token = None):
 		self.type = LZID
 	
 		if token != None:
@@ -167,12 +169,12 @@ class LZ(Token):
 			bestpos , bestlen = i - 1 , 0
 	
 			if len(src) - i >= minlz:
-				for j in findall(src,src[i:i+minlz],i,minlz):
+				for j in findall(src, src[i:i+minlz], i, minlz):
 					
 					l = minlz 
 					while i + l < len(src) and l < LONGESTLONGLZ and src[j + l] == src[i + l] :
 						l+=1
-					if l > bestlen:
+					if (l > bestlen and (i-j < LZOFFSET or i-bestpos >= LZOFFSET or l > LONGESTLZ)) or (l > bestlen + 1):
 						bestpos, bestlen = j , l
 	
 			self.size = bestlen
@@ -184,10 +186,13 @@ class LZ(Token):
 			self.offset = offset
 			
 	def getCost(self):
-		return (2 if (self.offset < 256) and (self.size <= LONGESTLZ) else 3) + 0.00134 - 0.00001 * self.size
+		if (self.offset < LZOFFSET) and (self.size <= LONGESTLZ):
+			return 2 + 0.00134 - 0.00001 * self.size
+		else:
+			return 3 + 0.00138 - 0.00001 * self.size
 		
 	def getPayload(self):
-		if self.offset >= 256 or self.size > LONGESTLZ:
+		if self.offset >= LZOFFSET or self.size > LONGESTLZ:
 			negoffset = (0-self.offset) 
 			return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (negoffset & 0xff) , ((negoffset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
 		else:
@@ -195,7 +200,7 @@ class LZ(Token):
 
 
 class LZ2(Token):
-	def __init__(self,src,i, offset = None, token = None):
+	def __init__(self, src, i, offset = None, token = None):
 		self.type = LZ2ID
 		self.size = 2
 		
@@ -204,7 +209,7 @@ class LZ2(Token):
 			
 		elif offset == None: 
 			if i+2 < len(src):
-				o = src.rfind(src[i:i+2], max(0,i-LZ2OFFSET),i + 1)
+				o = src.rfind(src[i:i+2], max(0, i-LZ2OFFSET), i + 1)
 				if o >= 0:
 					self.offset = i - o
 				else:
@@ -225,7 +230,7 @@ class LZ2(Token):
 	
 	
 class LIT(Token):
-	def __init__(self,src,i, token = None):
+	def __init__(self, src, i, token = None):
 		self.type = LITERALID	
 		self.size = 1
 		self.start = i
@@ -249,7 +254,7 @@ class Cruncher:
 		self.graph = dict()
 		self.crunchedSize = 0
 
-	def get_path(self,p):	
+	def get_path(self, p):	
 		i = len(p) - 1
 		path = [i]
 		while p[i] >= 0:
@@ -257,7 +262,7 @@ class Cruncher:
 			i = p[i]
 		path.reverse()
 	
-		return list(zip(path[::],path[1::]))
+		return list(zip(path[::], path[1::]))
 	
 	def prepend(self, data):
 		self.crunched = bytes(data) + bytes(self.crunched)
@@ -272,56 +277,55 @@ class Cruncher:
 		else:
 			src = bytes(self.src)
 		
-		
 		self.optimalRun = findOptimalZero(src)
 		
 		progress_string = "Populating LZ layer\t"
 		
-		for i in range(0,len(src)):	
+		for i in range(0, len(src)):	
 			if VERBOSE and ((i & 255) == 0):
-				progress(progress_string,i,len(src))
+				progress(progress_string, i, len(src))
 			lz2 = None
-			rle = RLE(src,i)
-			rlesize = min(rle.size,LONGESTRLE)
+			rle = RLE(src, i)
+			rlesize = min(rle.size, LONGESTRLE)
 			#don't compute prefix for same bytes or this will explode
 			#start computing for prefixes larger than RLE
 			if rlesize < LONGESTLONGLZ - 1:	
-				lz = LZ(src,i, minlz = rlesize + 1)
+				lz = LZ(src, i, minlz = max(rlesize + 1, MINLZ))
 			else:
-				lz = LZ(src,i,size = 1) #start with a dummy LZ
+				lz = LZ(src, i, size = 1) #start with a dummy LZ
 
 			if lz.size >= MINLZ or rlesize >= MINRLE:
 				starts.add(i)
 			while lz.size >= MINLZ and lz.size > rlesize:
 				ends.add(i+lz.size)
-				self.graph[(i,i+lz.size)] = lz
+				self.graph[(i, i+lz.size)] = lz
 				lz = LZ(src, i, size = lz.size - 1, offset = lz.offset)
 			
 			if rle.size > LONGESTRLE: # == 2 * LONGESTRLE:
 				rle = RLE(src, i, LONGESTRLE)
 				ends.add(i+LONGESTRLE)
-				self.graph[(i,i+LONGESTRLE)] = rle
+				self.graph[(i, i+LONGESTRLE)] = rle
 			else:
 				while rle.size >= MINRLE:
 					ends.add(i+rle.size)
-					self.graph[(i,i+rle.size)] = rle
+					self.graph[(i, i+rle.size)] = rle
 					rle = RLE(src, i, rle.size - 1)
 	
-			lz2 = LZ2(src,i)
+			lz2 = LZ2(src, i)
 			if lz2.offset > 0:
-				self.graph[(i,i+2)] = lz2
+				self.graph[(i, i+2)] = lz2
 				starts.add(i)
 				ends.add(i + 2)
 				 
-			zero = ZERORUN(src,i,self.optimalRun)
+			zero = ZERORUN(src, i, self.optimalRun)
 			if zero.size > 0:
-				self.graph[(i,i+self.optimalRun)] = zero
+				self.graph[(i, i+self.optimalRun)] = zero
 				starts.add(i)
 				ends.add(i+self.optimalRun)
 				
 				
 		if VERBOSE:
-			progress(progress_string,1,1)
+			progress(progress_string, 1, 1)
 			sys.stdout.write('\n')
 			
 		starts.add(len(src))
@@ -333,22 +337,22 @@ class Cruncher:
 		e,s = 0,0
 		while e < len(ends) and s < len(starts):
 			if VERBOSE and ((s & 255) == 0):
-				progress(progress_string,s,len(starts))
+				progress(progress_string, s, len(starts))
 			end = ends[e]
 			if end < starts[s]:
 				#bridge		
 				while starts[s] - end >= LONGESTLITERAL:
-					key = (end,end + LONGESTLITERAL)
+					key = (end, end + LONGESTLITERAL)
 					if not key in self.graph:
-						lit = LIT(src,end)
+						lit = LIT(src, end)
 						lit.size = LONGESTLITERAL
 						self.graph[key] = lit
 					end+=LONGESTLITERAL
 				s0 = s
 				while s0 < len(starts) and starts[s0] - end < LONGESTLITERAL:
-					key = (end,starts[s0])
+					key = (end, starts[s0])
 					if not key in self.graph:
-						lit = LIT(src,end)
+						lit = LIT(src, end)
 						lit.size = starts[s0] - end
 						self.graph[key] = lit
 					s0+=1
@@ -357,26 +361,26 @@ class Cruncher:
 				s+=1
 	
 		if VERBOSE:
-			progress(progress_string,1,1)
+			progress(progress_string, 1, 1)
 			sys.stdout.write('\n')
 	
 		progress_string = "Populating graph\t"
 		
 		if VERBOSE:
-			progress(progress_string,0,3)
+			progress(progress_string, 0, 3)
 		weights = tuple(v.getCost() for v in self.graph.values())
 		if VERBOSE:
-			progress(progress_string,1,3)
+			progress(progress_string, 1, 3)
 		sources = tuple(s for s, _ in self.graph.keys())
 		if VERBOSE:
-			progress(progress_string,2,3)
+			progress(progress_string, 2, 3)
 		targets = tuple(t for _, t in self.graph.keys())
 		n = len(src) + 1
 		dgraph = csr_matrix((weights, (sources, targets)), shape=(n, n))
 		if VERBOSE:
-			progress(progress_string,1,1)
+			progress(progress_string, 1, 1)
 			sys.stdout.write('\ncomputing shortest path\n')		
-		d,p = dijkstra(dgraph,indices = 0,return_predecessors = True)
+		d,p = dijkstra(dgraph, indices = 0, return_predecessors = True)
 		for key in self.get_path(p):
 			self.token_list.append(self.graph[key])
 
@@ -385,7 +389,7 @@ class Cruncher:
 			segment_uncrunched_size = 0
 			segment_crunched_size = 0
 			total_uncrunched_size = 0
-			for i in range(len(self.token_list)-1,-1,-1):
+			for i in range(len(self.token_list)-1, -1, -1):
 				segment_crunched_size+=len(self.token_list[i].getPayload()) #token size
 				segment_uncrunched_size+=self.token_list[i].size #decrunched token raw size
 				if segment_uncrunched_size <= segment_crunched_size + 0:
@@ -429,7 +433,7 @@ class Cruncher:
 					else:
 						nlz+=1
 			
-			tot = sum((nlz,nlzl,nlz2,nrle,nz,nlit))
+			tot = sum((nlz, nlzl, nlz2, nrle, nz, nlit))
 			sys.stdout.write ("lz: %d, lzl: %d, lz2: %d, rle: %d, nz: %d, lit: %d (1 = %d) tot: %d\n" % (nlz,nlzl,nlz2,nrle,nz,nlit,nlit1,tot))
 	
 
@@ -502,8 +506,8 @@ class Decruncher:
 						self.decrunched.append(self.decrunched[p-offset + l])			
 					nlz+=1
 					
-			tot = sum((nlz,nlz2,nrle,nz,nlit))
-			sys.stdout.write ("lz: %d, lz2: %d, rle: %d, nz: %d,  lit: %d tot: %d\n" % (nlz,nlz2,nrle,nz,nlit,tot))
+			tot = sum((nlz, nlz2, nrle, nz, nlit))
+			sys.stdout.write ("lz: %d, lz2: %d, rle: %d, nz: %d,  lit: %d tot: %d\n" % (nlz, nlz2, nrle, nz, nlit, tot))
 	
 def usage():
 	print ("TSCrunch 1.3 - binary cruncher, by Antonio Savona")
@@ -527,7 +531,7 @@ if __name__ == "__main__":
 			SFX = True
 			PRG = True
 			jmp_str = sys.argv[sys.argv.index("-x") + 1].strip("$")
-			jmp = int(jmp_str,base = 16)
+			jmp = int(jmp_str, base = 16)
 		
 		if "-i" in sys.argv:
 			INPLACE = True
@@ -540,7 +544,7 @@ if __name__ == "__main__":
 			sys.stderr.write ("Can't create an sfx prg with inplace crunching\n")
 			exit(-1)
 			
-		fr = open(sys.argv[-2],"rb")
+		fr = open(sys.argv[-2], "rb")
 		src = load_raw(fr)
 
 		sourceLen = len(src)
@@ -587,9 +591,9 @@ if __name__ == "__main__":
 			loadTo = decrunchEnd - len(cruncher.crunched) + 1
 			cruncher.prepend([loadTo & 255, loadTo >> 8])
 			
-		fo = open(sys.argv[-1],"wb")
+		fo = open(sys.argv[-1], "wb")
 
-		save_raw(fo,cruncher.crunched)
+		save_raw(fo, cruncher.crunched)
 		fo.close()
 		
 		if VERBOSE:
@@ -603,9 +607,9 @@ if __name__ == "__main__":
 		if DEBUG and not (SFX or INPLACE):
 			decruncher = Decruncher(cruncher.crunched)
 		
-			fo = open("test.raw","wb")
+			fo = open("test.raw", "wb")
 
-			save_raw(fo,decruncher.decrunched)
+			save_raw(fo, decruncher.decrunched)
 			fo.close()
 		
 			assert(decruncher.decrunched == src)

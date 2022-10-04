@@ -62,7 +62,8 @@ const LONGESTLZ = 32
 const LONGESTLITERAL = 31
 const MINRLE = 2
 const MINLZ = 3
-const LZOFFSET = 32767
+const LZOFFSET = 256
+const LONGLZOFFSET = 32767
 const LZ2OFFSET = 94
 
 const RLEMASK = 0x81
@@ -116,7 +117,7 @@ func fillPrefixArray(data []byte, ctx *crunchCtx) {
 
 func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-chan int {
 	c := make(chan int)
-	x0 := max(0, i-LZOFFSET)
+	x0 := max(0, i-LONGLZOFFSET)
 	x1 := min(i+minlz-1, len(data))
 
 	if ctx.usePrefixArray {
@@ -202,7 +203,7 @@ func tokenCost(n0, n1 int, t byte) int64 {
 	case LZID:
 		return mdiv*2 + 134 - size
 	case LONGLZID:
-		return mdiv*3 + 134 - size
+		return mdiv*3 + 138 - size
 	case RLEID:
 		return mdiv*2 + 128 - size
 	case ZERORUNID:
@@ -254,7 +255,7 @@ func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) toke
 				for i+l < len(src) && l < LONGESTLONGLZ && src[j+l] == src[i+l] {
 					l++
 				}
-				if l > bestlen {
+				if (l > bestlen && (i-j < LZOFFSET || i-bestpos >= LZOFFSET || l > LONGESTLZ)) || (l > bestlen+1) {
 					bestpos = j
 					bestlen = l
 				}

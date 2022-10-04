@@ -247,12 +247,9 @@ tsdecrunch:
 			
 			//update zero page with a = runlen, x = 2, y = 0
 			ldy #0
-			//clc not needed as we have len - 1 in A (from the encoder) and C = 1
-		#if INPLACE
-			jmp updatezp_noclc
-		#else	
+			//clc not needed as we have len - 1 in A (from the encoder) and C = 1			
 			bcs updatezp_noclc
-		#endif
+
 		
 	optRun:	
 			ldy #255
