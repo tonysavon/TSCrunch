@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -19,10 +18,9 @@ import (
 )
 
 type tokenGraph struct {
-	wg           sync.WaitGroup
-	mg, ms, me   sync.Mutex
-	starts, ends map[int]bool
-	graph        map[edge]token
+	wg         sync.WaitGroup
+	mg, ms, me sync.Mutex
+	graph      map[edge]token
 }
 
 type crunchCtx struct {
@@ -223,18 +221,19 @@ func tokenPayload(src []byte, t token) []byte {
 	n0 := t.i
 	n1 := t.i + t.size
 
-	if t.tokentype == LZID {
+	switch t.tokentype {
+	case LZID:
 		return []byte{byte(LZMASK | (((t.size - 1) << 2) & 0x7f) | 2), byte(t.offset & 0xff)}
-	} else if t.tokentype == LONGLZID {
+	case LONGLZID:
 		negoffset := (0 - t.offset)
 		return []byte{byte(LZMASK | (((t.size-1)>>1)<<2)&0x7f), byte(negoffset & 0xff), byte(((negoffset >> 8) & 0x7f) | (((t.size - 1) & 1) << 7))}
-	} else if t.tokentype == RLEID {
+	case RLEID:
 		return []byte{RLEMASK | byte(((t.size-1)<<1)&0x7f), t.rlebyte}
-	} else if t.tokentype == ZERORUNID {
+	case ZERORUNID:
 		return []byte{RLEMASK}
-	} else if t.tokentype == LZ2ID {
+	case LZ2ID:
 		return []byte{LZ2MASK | byte(0x7f-t.offset)}
-	} else {
+	default:
 		return append([]byte{byte(LITERALMASK | t.size)}, src[n0:n1]...)
 	}
 }
@@ -267,7 +266,7 @@ func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) toke
 		lz.size = size
 		lz.offset = offset
 	}
-	if lz.size > LONGESTLZ || lz.offset >= 256 {
+	if lz.size > LONGESTLZ || lz.offset >= LZOFFSET {
 		lz.tokentype = LONGLZID
 	}
 	return lz
@@ -350,41 +349,23 @@ func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 	//start computing for prefixes larger than RLE size
 	var lz token
 	if rlesize < LONGESTLONGLZ-1 {
-		lz = LZ(src, i, 0, 0, rlesize+1, ctx)
+		lz = LZ(src, i, 0, 0, max(rlesize+1, MINLZ), ctx)
 	} else {
 		lz = LZ(src, -1, -1, -1, -1, ctx) // start with a dummy lz
 	}
 
-	if lz.size >= MINLZ || rlesize >= MINRLE {
-		tg.ms.Lock()
-		tg.starts[i] = true
-		tg.ms.Unlock()
-	}
-
 	for size := lz.size; size >= MINLZ && size > rlesize; size-- {
-		tg.me.Lock()
-		tg.ends[i+size] = true
-		tg.me.Unlock()
-
 		tg.mg.Lock()
 		tg.graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ, ctx)
 		tg.mg.Unlock()
 	}
 
 	if rle.size > LONGESTRLE {
-		tg.me.Lock()
-		tg.ends[i+LONGESTRLE] = true
-		tg.me.Unlock()
-
 		tg.mg.Lock()
 		tg.graph[edge{i, i + LONGESTRLE}] = RLE(src, -1, LONGESTRLE, src[i])
 		tg.mg.Unlock()
 	} else {
 		for size := rle.size; size >= MINRLE; size-- {
-			tg.me.Lock()
-			tg.ends[i+size] = true
-			tg.me.Unlock()
-
 			tg.mg.Lock()
 			tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
 			tg.mg.Unlock()
@@ -396,14 +377,6 @@ func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 			tg.mg.Lock()
 			tg.graph[edge{i, i + 2}] = lz2 //LZ2ID
 			tg.mg.Unlock()
-
-			tg.ms.Lock()
-			tg.starts[i] = true
-			tg.ms.Unlock()
-
-			tg.me.Lock()
-			tg.ends[i+2] = true
-			tg.me.Unlock()
 		}
 	}
 
@@ -412,14 +385,6 @@ func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 		tg.mg.Lock()
 		tg.graph[edge{i, i + ctx.optimalRun}] = zero
 		tg.mg.Unlock()
-
-		tg.ms.Lock()
-		tg.starts[i] = true
-		tg.ms.Unlock()
-
-		tg.me.Lock()
-		tg.ends[i+ctx.optimalRun] = true
-		tg.me.Unlock()
 	}
 
 	tg.wg.Done()
@@ -452,13 +417,11 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	}
 
 	tgraph := tokenGraph{
-		wg:     sync.WaitGroup{},
-		mg:     sync.Mutex{},
-		ms:     sync.Mutex{},
-		me:     sync.Mutex{},
-		starts: make(map[int]bool),
-		ends:   make(map[int]bool),
-		graph:  make(map[edge]token),
+		wg:    sync.WaitGroup{},
+		mg:    sync.Mutex{},
+		ms:    sync.Mutex{},
+		me:    sync.Mutex{},
+		graph: make(map[edge]token),
 	}
 
 	ctx.sourceLen = len(src)
@@ -507,52 +470,18 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		}
 	}
 
-	tgraph.starts[len(src)] = true
-	tgraph.ends[0] = true
-	starts_ := make([]int, 0, len(tgraph.starts))
-	ends_ := make([]int, 0, len(tgraph.ends))
-	for k := range tgraph.starts {
-		starts_ = append(starts_, k)
-	}
-	for k := range tgraph.ends {
-		ends_ = append(ends_, k)
-	}
-
-	sort.Ints(starts_)
-	sort.Ints(ends_)
-
 	if !ctx.QUIET {
 		fmt.Print("Closing Gaps")
 	}
 
-	e, s := 0, 0
-	for e < len(ends_) && s < len(starts_) {
-		end := ends_[e]
-		if end < starts_[s] {
-			//bridge
-			for starts_[s]-end >= LONGESTLITERAL {
-				key := edge{end, end + LONGESTLITERAL}
-				_, haskey := tgraph.graph[key]
-				if !haskey {
-					lit := LIT(end, LONGESTLITERAL)
-					lit.size = LONGESTLITERAL
-					tgraph.graph[key] = lit
-				}
-				end += LONGESTLITERAL
+	for i := 0; i < len(src); i++ {
+		for j := 1; j < min(LONGESTLITERAL+1, len(src)+1-i); j++ {
+			key := edge{i, i + j}
+			_, haskey := tgraph.graph[key]
+			if !haskey {
+				lit := LIT(i, j)
+				tgraph.graph[key] = lit
 			}
-
-			for s0 := s; s0 < len(starts_) && starts_[s0]-end < LONGESTLITERAL; s0++ {
-				key := edge{end, starts_[s0]}
-				_, haskey := tgraph.graph[key]
-				if !haskey {
-					lit := LIT(end, starts_[s0]-end)
-					lit.size = starts_[s0] - end
-					tgraph.graph[key] = lit
-				}
-			}
-			e++
-		} else {
-			s++
 		}
 	}
 

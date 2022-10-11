@@ -174,7 +174,7 @@ class LZ(Token):
 					l = minlz 
 					while i + l < len(src) and l < LONGESTLONGLZ and src[j + l] == src[i + l] :
 						l+=1
-					if (l > bestlen and (i-j < LZOFFSET or i-bestpos >= LZOFFSET or l > LONGESTLZ)) or (l > bestlen + 1):
+					if (l > bestlen and (i - j < LZOFFSET or i - bestpos >= LZOFFSET or l > LONGESTLZ)) or (l > bestlen + 1):
 						bestpos, bestlen = j , l
 	
 			self.size = bestlen
@@ -193,7 +193,7 @@ class LZ(Token):
 		
 	def getPayload(self):
 		if self.offset >= LZOFFSET or self.size > LONGESTLZ:
-			negoffset = (0-self.offset) 
+			negoffset = (0 - self.offset) 
 			return [LZMASK | ((((self.size - 1)>>1)<< 2) & 0x7f) | 0 , (negoffset & 0xff) , ((negoffset >> 8) & 0x7f) | (((self.size - 1) & 1) << 7 )]	
 		else:
 			return [LZMASK | (((self.size - 1)<< 2) & 0x7f) | 2 , (self.offset & 0xff) ] 
@@ -209,14 +209,14 @@ class LZ2(Token):
 			
 		elif offset == None: 
 			if i+2 < len(src):
-				o = src.rfind(src[i:i+2], max(0, i-LZ2OFFSET), i + 1)
+				o = src.rfind(src[i:i+2], max(0, i - LZ2OFFSET), i + 1)
 				if o >= 0:
 					self.offset = i - o
 				else:
 					self.offset = -1
 			
 			else:
-				 self.offset = - 1
+				 self.offset = -1
 			
 		else:
 			self.offset = offset
@@ -268,9 +268,6 @@ class Cruncher:
 		self.crunched = bytes(data) + bytes(self.crunched)
 	
 	def ocrunch(self):
-		starts = set()
-		ends = set()
-
 		if INPLACE:	
 			remainder = self.src[-1:]
 			src = bytes(self.src[:-1])
@@ -294,71 +291,41 @@ class Cruncher:
 			else:
 				lz = LZ(src, i, size = 1) #start with a dummy LZ
 
-			if lz.size >= MINLZ or rlesize >= MINRLE:
-				starts.add(i)
 			while lz.size >= MINLZ and lz.size > rlesize:
-				ends.add(i+lz.size)
 				self.graph[(i, i+lz.size)] = lz
 				lz = LZ(src, i, size = lz.size - 1, offset = lz.offset)
 			
 			if rle.size > LONGESTRLE: # == 2 * LONGESTRLE:
 				rle = RLE(src, i, LONGESTRLE)
-				ends.add(i+LONGESTRLE)
 				self.graph[(i, i+LONGESTRLE)] = rle
 			else:
 				while rle.size >= MINRLE:
-					ends.add(i+rle.size)
 					self.graph[(i, i+rle.size)] = rle
 					rle = RLE(src, i, rle.size - 1)
 	
 			lz2 = LZ2(src, i)
 			if lz2.offset > 0:
 				self.graph[(i, i+2)] = lz2
-				starts.add(i)
-				ends.add(i + 2)
 				 
 			zero = ZERORUN(src, i, self.optimalRun)
 			if zero.size > 0:
 				self.graph[(i, i+self.optimalRun)] = zero
-				starts.add(i)
-				ends.add(i+self.optimalRun)
-				
-				
+								
 		if VERBOSE:
 			progress(progress_string, 1, 1)
 			sys.stdout.write('\n')
-			
-		starts.add(len(src))
-		starts = sorted(list(starts))
-		ends = [0] + sorted(list(ends))	
+
 
 		progress_string = "Closing gaps\t\t"
 
-		e,s = 0,0
-		while e < len(ends) and s < len(starts):
-			if VERBOSE and ((s & 255) == 0):
-				progress(progress_string, s, len(starts))
-			end = ends[e]
-			if end < starts[s]:
-				#bridge		
-				while starts[s] - end >= LONGESTLITERAL:
-					key = (end, end + LONGESTLITERAL)
-					if not key in self.graph:
-						lit = LIT(src, end)
-						lit.size = LONGESTLITERAL
-						self.graph[key] = lit
-					end+=LONGESTLITERAL
-				s0 = s
-				while s0 < len(starts) and starts[s0] - end < LONGESTLITERAL:
-					key = (end, starts[s0])
-					if not key in self.graph:
-						lit = LIT(src, end)
-						lit.size = starts[s0] - end
-						self.graph[key] = lit
-					s0+=1
-				e+=1
-			else:
-				s+=1
+		for i in range(len(src) - 1):
+			if VERBOSE and ((i & 255) == 0):
+				progress(progress_string, i, len(src))
+			for j in range (1,min(LONGESTLITERAL + 1, len(src) + 1 - i)):
+				if (i, i + j) not in self.graph:
+					lit = LIT(src,i)
+					lit.size = j
+					self.graph[(i, i + j)] = lit
 	
 		if VERBOSE:
 			progress(progress_string, 1, 1)
@@ -389,7 +356,7 @@ class Cruncher:
 			segment_uncrunched_size = 0
 			segment_crunched_size = 0
 			total_uncrunched_size = 0
-			for i in range(len(self.token_list)-1, -1, -1):
+			for i in range(len(self.token_list) - 1, -1, -1):
 				segment_crunched_size+=len(self.token_list[i].getPayload()) #token size
 				segment_uncrunched_size+=self.token_list[i].size #decrunched token raw size
 				if segment_uncrunched_size <= segment_crunched_size + 0:
@@ -475,7 +442,7 @@ class Decruncher:
 					offset =  127 - (code & 0x7f) 
 					p = len(self.decrunched)
 					for l in range(run):
-						self.decrunched.append(self.decrunched[p-offset + l])
+						self.decrunched.append(self.decrunched[p - offset + l])
 					i+=1
 					nlz2+=1	
 					
@@ -503,7 +470,7 @@ class Decruncher:
 						i+=3
 					p = len(self.decrunched)
 					for l in range(run):
-						self.decrunched.append(self.decrunched[p-offset + l])			
+						self.decrunched.append(self.decrunched[p - offset + l])			
 					nlz+=1
 					
 			tot = sum((nlz, nlz2, nrle, nz, nlit))
