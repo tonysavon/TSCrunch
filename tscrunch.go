@@ -18,9 +18,9 @@ import (
 )
 
 type tokenGraph struct {
-	wg         sync.WaitGroup
-	mg, ms, me sync.Mutex
-	graph      map[edge]token
+	wg	sync.WaitGroup
+	mg	sync.Mutex
+	graph	map[edge]token
 }
 
 type crunchCtx struct {
@@ -347,46 +347,42 @@ func crunchAtByte(src []byte, i int, tg *tokenGraph, ctx *crunchCtx) {
 	rlesize := min(rle.size, LONGESTRLE)
 	//don't compute prefix for same bytes or this will explode
 	//start computing for prefixes larger than RLE size
-	var lz token
+	var lz,lz2 token
 	if rlesize < LONGESTLONGLZ-1 {
 		lz = LZ(src, i, 0, 0, max(rlesize+1, MINLZ), ctx)
 	} else {
 		lz = LZ(src, -1, -1, -1, -1, ctx) // start with a dummy lz
 	}
 
-	for size := lz.size; size >= MINLZ && size > rlesize; size-- {
-		tg.mg.Lock()
-		tg.graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ, ctx)
-		tg.mg.Unlock()
-	}
-
-	if rle.size > LONGESTRLE {
-		tg.mg.Lock()
-		tg.graph[edge{i, i + LONGESTRLE}] = RLE(src, -1, LONGESTRLE, src[i])
-		tg.mg.Unlock()
-	} else {
-		for size := rle.size; size >= MINRLE; size-- {
-			tg.mg.Lock()
-			tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
-			tg.mg.Unlock()
-		}
-	}
 	if len(src)-i > 2 {
-		lz2 := LZ2(src, i, 0, 0)
-		if lz2.size == 2 {
-			tg.mg.Lock()
-			tg.graph[edge{i, i + 2}] = lz2 //LZ2ID
-			tg.mg.Unlock()
-		}
+		lz2 = LZ2(src, i, 0, 0)
 	}
 
 	zero := ZERORUN(src, i, ctx.optimalRun)
-	if zero.size != 0 {
-		tg.mg.Lock()
-		tg.graph[edge{i, i + ctx.optimalRun}] = zero
-		tg.mg.Unlock()
+
+	tg.mg.Lock()
+
+	for size := lz.size; size >= MINLZ && size > rlesize; size-- {
+		tg.graph[edge{i, i + size}] = LZ(src, -1, size, lz.offset, MINLZ, ctx)	
 	}
 
+	if rle.size > LONGESTRLE {
+		tg.graph[edge{i, i + LONGESTRLE}] = RLE(src, -1, LONGESTRLE, src[i])
+	} else {
+		for size := rle.size; size >= MINRLE; size-- {
+			tg.graph[edge{i, i + size}] = RLE(src, -1, size, src[i])
+		}
+	}
+
+	if lz2.size == 2 {
+		tg.graph[edge{i, i + 2}] = lz2
+	}
+	
+	if zero.size != 0 {
+		tg.graph[edge{i, i + ctx.optimalRun}] = zero
+	}
+
+	tg.mg.Unlock()
 	tg.wg.Done()
 }
 
@@ -419,8 +415,6 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	tgraph := tokenGraph{
 		wg:    sync.WaitGroup{},
 		mg:    sync.Mutex{},
-		ms:    sync.Mutex{},
-		me:    sync.Mutex{},
 		graph: make(map[edge]token),
 	}
 
@@ -479,8 +473,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 			key := edge{i, i + j}
 			_, haskey := tgraph.graph[key]
 			if !haskey {
-				lit := LIT(i, j)
-				tgraph.graph[key] = lit
+				tgraph.graph[key] = LIT(i, j)
 			}
 		}
 	}
