@@ -37,6 +37,7 @@ type crunchCtx struct {
 	optimalRun     int
 	crunchedSize   int
 	sourceLen      int
+	sourceAbsLen   int
 	decrunchEnd    uint16
 	prefixArray    map[[MINLZ]byte][]int
 	usePrefixArray bool
@@ -442,6 +443,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	}
 
 	ctx.sourceLen = len(src)
+	ctx.sourceAbsLen = ctx.sourceLen
 
 	remainder := []byte{}
 	var G = dijkstra.NewGraph()
@@ -450,15 +452,16 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		ctx.addr = src[:2]
 		src = src[2:]
 		ctx.decrunchTo = uint16(ctx.addr[0]) + 256*uint16(ctx.addr[1])
-	}
-
-	for i := 0; i < len(src)+1; i++ {
-		G.AddVertex(i)
+		ctx.sourceAbsLen -=2
 	}
 
 	if ctx.INPLACE {
 		remainder = src[len(src)-1:]
 		src = src[:len(src)-1]
+	}
+
+	for i := 0; i < len(src)+1; i++ {
+		G.AddVertex(i)
 	}
 
 	ctx.optimalRun = findOptimalZeroRun(src)
@@ -536,6 +539,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 			fmt.Println()
 		}
 	}
+
 	crunched := make([]byte, 0)
 	token_list := make([]token, 0)
 
@@ -614,7 +618,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		ctx.loadTo = 0x0801
 	}
 
-	ctx.decrunchEnd = uint16(int(ctx.decrunchTo) + len(src) - 1)
+	ctx.decrunchEnd = uint16(int(ctx.decrunchTo) + ctx.sourceAbsLen - 1)
 
 	if ctx.INPLACE {
 		ctx.loadTo = ctx.decrunchEnd - uint16(len(crunched)) + 1
