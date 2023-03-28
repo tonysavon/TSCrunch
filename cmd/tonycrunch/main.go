@@ -1,6 +1,6 @@
 /*
-TSCrunch binary cruncher, by Antonio Savona
-fast mode hack by burg
+TonyCrunch is a fork of Antonio Savona's TSCrunch.
+Refactoring, including fast mode by burg.
 */
 package main
 
@@ -18,7 +18,7 @@ import (
 func usage() {
 	fmt.Printf("TSCrunch %s - binary cruncher, by Antonio Savona\n", TSCrunch.Version)
 	fmt.Println("Fast mode by burg")
-	fmt.Println("Usage: tscrunch [-p] [-i] [-f] [-q] [-x $addr] infile outfile")
+	fmt.Println("Usage: tscrunch [-p] [-i] [-f] [-q] [-x $081f|0x081f|2079] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")
 	fmt.Println(" -i  : inplace crunching (forces -p)")

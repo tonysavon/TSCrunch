@@ -1,6 +1,6 @@
 /*
-TSCrunch binary cruncher, by Antonio Savona
-fast mode and multi hack by burg
+TonyCrunch is a fork of Antonio Savona's TSCrunch.
+Refactoring, including fast mode and multi-hack by burg.
 */
 package main
 

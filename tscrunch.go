@@ -100,6 +100,18 @@ func New(opt Options, r io.Reader) (*tsc, error) {
 				return nil, fmt.Errorf("unable to parse jump address %q: %w", opt.JumpTo, err)
 			}
 			opt.jmp = uint16(jmp)
+		} else if opt.JumpTo[0] == '0' && opt.JumpTo[1] == 'x' {
+			jmp, err := strconv.ParseUint(opt.JumpTo[2:], 16, 16)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse jump address %q: %w", opt.JumpTo, err)
+			}
+			opt.jmp = uint16(jmp)
+		} else {
+			jmp, err := strconv.Atoi(opt.JumpTo)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse jump address %q: %w", opt.JumpTo, err)
+			}
+			opt.jmp = uint16(jmp)
 		}
 		if opt.jmp == 0 {
 			return nil, fmt.Errorf("incorrect jump address %q", opt.JumpTo)
