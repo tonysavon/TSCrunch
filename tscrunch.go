@@ -242,11 +242,27 @@ func fillPrefixArray(data []byte, ctx *crunchCtx) {
 
 func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-chan int {
 	c := make(chan int)
+
+	// Full guard against short prefix or bad slice
+	if len(prefix) < MINLZ || len(data) == 0 || minlz < MINLZ || i >= len(data) {
+		close(c)
+		return c
+	}
+
 	x0 := max(0, i-LONGLZOFFSET)
 	x1 := min(i+minlz-1, len(data))
+
 	if ctx.usePrefixArray {
-		parray := ctx.prefixArray[*(*[MINLZ]byte)(prefix[:MINLZ])]
+		// FULL GUARD before accessing key
+		var key [MINLZ]byte
+		copy(key[:], prefix) // will zero-fill if prefix is too short
+		parray := ctx.prefixArray[key]
+
 		go func() {
+			if len(parray) == 0 {
+				close(c)
+				return
+			}
 			l := 0
 			h := len(parray) - 1
 			var mid int
@@ -261,16 +277,16 @@ func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-cha
 					l = mid
 				}
 			}
-			for o := mid; o >= 0 && parray[o] > x0; o-- {
-				if parray[o] < i && bytes.Equal(data[parray[o]:parray[o]+minlz], prefix) {
+			for o := mid; o >= 0 && o < len(parray) && parray[o] > x0; o-- {
+				if parray[o] < i && parray[o]+minlz <= len(data) && bytes.Equal(data[parray[o]:parray[o]+minlz], prefix) {
 					c <- parray[o]
 				}
 			}
 			close(c)
 		}()
 	} else {
-		f := 1
 		go func() {
+			f := 1
 			for f >= 0 {
 				f = bytes.LastIndex(data[x0:x1], prefix)
 				if f >= 0 {
@@ -281,6 +297,7 @@ func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-cha
 			close(c)
 		}()
 	}
+
 	return c
 }
 
@@ -365,7 +382,7 @@ func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) toke
 	if i >= 0 {
 		bestpos := i - 1
 		bestlen := 0
-		if len(src)-i >= minlz {
+		if i+minlz <= len(src) {
 			prefixes := findall(src, src[i:i+minlz], i, minlz, ctx)
 			for j := range prefixes {
 				l := minlz
