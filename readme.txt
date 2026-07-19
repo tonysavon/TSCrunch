@@ -1,8 +1,8 @@
-TSCrunch V1.3.1
+TSCrunch V1.3.2
 
 by Antonio Savona
 
-March 2025
+July 2026
 
 
 About
@@ -14,15 +14,16 @@ TSCrunch was designed as the default asset cruncher for the game A Pig Quest, an
 Requirements
 ============
 
-TSCrunch is written in GO and therefore should run on any machine that supports a go compiler.
+TSCrunch includes maintained C99, Go, and Java encoders. They implement the same format and produce identical compressed streams.
+The C and Go implementations in particular make it straightforward to compile TSCrunch for a wide range of operating systems and processor architectures. The C encoder is the fastest implementation and is used for the native Windows x64 and Linux x64 release binaries. The Go encoder provides a portable implementation and is used for the macOS ARM64 release binary.
+The Java encoder is also the implementation used by the TSCrunch KickAssembler plugin:
+https://github.com/tonysavon/TSCrunch-Kickassembler-Plugin
 Precompiled binaries are available for the following platforms:
 - windows x64
-- windows arm64
 - linux x64
 - mac / darwin arm64
 
-A python version is also supplied as reference encoder, but use of GO version is recommended for speed. 
-The memory decrunchers requires Kick Assembler, but it should be quite easy to port them to your assembler of choice.
+The memory decrunchers require Kick Assembler, but they should be quite easy to port to your assembler of choice.
 
 Usage
 =====
@@ -64,6 +65,15 @@ If you want the C99 encoder (tscrunch.c), you can build it with a standard C com
 
 	cc -std=c99 -O2 -o tscrunch.exe tscrunch.c
 
+On Linux and other Unix-like systems, link the math library and omit the .exe suffix:
+
+	cc -std=c99 -O2 -o tscrunch tscrunch.c -lm
+
+Building the Go encoder
+=======================
+
+	go build -o tscrunch tscrunch.go
+
 Building the Java encoder
 =========================
 
@@ -81,11 +91,11 @@ Run:
 Self-check mode
 ===============
 
-The C encoder supports a quick self-check flag to compare output sizes against the Python and Go encoders:
+The C and Java encoders support a quick self-check flag to compare output size against the Go encoder:
 
 	tscrunch --selfcheck [options] infile outfile
 
-This runs the Python and Go versions (if available) with the same options and prints the output sizes.
+This runs the Go version (if available) with the same options and prints the output sizes.
 
 Decrunching files from code
 ===========================
@@ -144,9 +154,16 @@ Cycles per byte	16.08792872		24.15191951		36.12186388
 Changelog
 =========
 
+1.3.2
+-Improved compression by fixing boundary cases in LZ and LZ2 candidate selection.
+-Replaced heap-based parsing with deterministic forward dynamic programming.
+-Added indexed match discovery and substantially reduced encoder runtime and memory use.
+-Synchronized the C99, Go, and Java encoders and verified byte-identical corpus output.
+-The compressed format and the three 6502 decrunchers are unchanged from version 1.3.1.
+
 1.3.1
 -TSCrunch is now available on three platforms: Windows, Linux, and macOS.
--Vastly improved crunching speed, with a reduced memory footprint for both the executable and the Python version.
+-Vastly improved crunching speed, with a reduced memory footprint for the encoder.
 -Slightly improved compression for SFX files.
 -Slightly smaller decrunchers when using the INPLACE option.
 

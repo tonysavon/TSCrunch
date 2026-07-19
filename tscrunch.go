@@ -1,144 +1,21 @@
 /*
-TSCrunch v1.3.1 binary cruncher, by Antonio Savona
+TSCrunch v1.3.2 binary cruncher, by Antonio Savona
 */
 
 package main
 
 import (
 	"bytes"
-	"container/heap"
 	"flag"
 	"fmt"
 	"math"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 )
-
-// ----------------------
-// Local Dijkstra Implementation
-// ----------------------
-
-// Arc represents an edge from one vertex to another with a weight.
-type Arc struct {
-	dest   int
-	weight int64
-}
-
-// Graph holds an adjacency list representation.
-type Graph struct {
-	arcs map[int][]Arc
-	n    int // total number of vertices
-}
-
-// NewGraph creates a new graph with n vertices.
-func NewGraph(n int) *Graph {
-	return &Graph{
-		arcs: make(map[int][]Arc, n),
-		n:    n,
-	}
-}
-
-// AddVertex ensures that vertex v exists.
-func (g *Graph) AddVertex(v int) {
-	if _, ok := g.arcs[v]; !ok {
-		g.arcs[v] = []Arc{}
-	}
-}
-
-// AddArc adds a directed edge from u to v with the given weight.
-func (g *Graph) AddArc(u, v int, weight int64) {
-	g.arcs[u] = append(g.arcs[u], Arc{dest: v, weight: weight})
-}
-
-// Item is an element in the priority queue.
-type Item struct {
-	vertex   int
-	priority int64
-	index    int // index in the heap
-}
-
-// PriorityQueue implements heap.Interface.
-type PriorityQueue []*Item
-
-func (pq PriorityQueue) Len() int { return len(pq) }
-func (pq PriorityQueue) Less(i, j int) bool {
-	return pq[i].priority < pq[j].priority
-}
-func (pq PriorityQueue) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
-}
-func (pq *PriorityQueue) Push(x interface{}) {
-	n := len(*pq)
-	item := x.(*Item)
-	item.index = n
-	*pq = append(*pq, item)
-}
-func (pq *PriorityQueue) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	item := old[n-1]
-	old[n-1] = nil // avoid memory leak
-	item.index = -1
-	*pq = old[0 : n-1]
-	return item
-}
-
-// Shortest computes the shortest path from source to target using Dijkstra’s algorithm.
-// It returns the path (as a slice of vertex indices), the total cost, and a flag indicating success.
-func (g *Graph) Shortest(source, target int) (path []int, cost int64, found bool) {
-	const INF = math.MaxInt64
-	dist := make([]int64, g.n)
-	prev := make([]int, g.n)
-	for i := 0; i < g.n; i++ {
-		dist[i] = INF
-		prev[i] = -1
-	}
-	dist[source] = 0
-
-	pq := make(PriorityQueue, 0, g.n)
-	heap.Init(&pq)
-	heap.Push(&pq, &Item{vertex: source, priority: 0})
-
-	for pq.Len() > 0 {
-		item := heap.Pop(&pq).(*Item)
-		u := item.vertex
-		if u == target {
-			break
-		}
-		for _, arc := range g.arcs[u] {
-			alt := dist[u] + arc.weight
-			if alt < dist[arc.dest] {
-				dist[arc.dest] = alt
-				prev[arc.dest] = u
-				heap.Push(&pq, &Item{vertex: arc.dest, priority: alt})
-			}
-		}
-	}
-
-	if dist[target] == INF {
-		return nil, 0, false
-	}
-
-	// Reconstruct the path.
-	for u := target; u != -1; u = prev[u] {
-		path = append(path, u)
-	}
-	// Reverse the path to get source->target.
-	for i, j := 0, len(path)-1; i < j; i, j = i+1, j-1 {
-		path[i], path[j] = path[j], path[i]
-	}
-
-	return path, dist[target], true
-}
-
-// ----------------------
-// End Local Dijkstra Implementation
-// ----------------------
 
 // Go TSCrunch Code
 
@@ -181,12 +58,97 @@ type tokenEntry struct {
 	t token
 }
 
+type lzCandidates struct {
+	short token
+	long  token
+}
+
+// shortestPathForward computes the exact shortest path in input-position
+// order. transitions contains only specialized tokens; literal transitions are
+// generated directly while visiting each position. A specialized token still
+// suppresses the literal with the same start and end, exactly as the old gap
+// closing pass did.
+//
+// Every token edge moves strictly forward, so positions are already a
+// topological ordering and a priority queue is unnecessary. Equal total-cost
+// arrivals prefer the predecessor with lower accumulated cost, matching the
+// order in which Dijkstra settled them; equal predecessor costs keep the first
+// arrival, retaining the original strict-less tie rule.
+func shortestPathForward(transitions []token, starts []int, inputSize int) ([]token, int64, bool) {
+	const unreachable = int64(math.MaxInt64)
+
+	cost := make([]int64, inputSize+1)
+	predecessor := make([]int, inputSize+1)
+	descriptor := make([]token, inputSize+1)
+
+	for i := range cost {
+		cost[i] = unreachable
+		predecessor[i] = -1
+	}
+	cost[0] = 0
+	relax := func(position, destination int, transitionCost int64, transition token) {
+		candidateCost := cost[position] + transitionCost
+		better := candidateCost < cost[destination]
+		if candidateCost == cost[destination] {
+			previous := predecessor[destination]
+			better = previous >= 0 && cost[position] < cost[previous]
+		}
+		if better {
+			cost[destination] = candidateCost
+			predecessor[destination] = position
+			descriptor[destination] = transition
+		}
+	}
+
+	for position := 0; position < inputSize; position++ {
+		if cost[position] == unreachable {
+			continue
+		}
+		var specializedLiteralLengths uint32
+		for index := starts[position]; index < starts[position+1]; index++ {
+			transition := transitions[index]
+			destination := position + transition.size
+			relax(position, destination, tokenCost(position, destination, transition.tokentype), transition)
+			if transition.size <= LONGESTLITERAL {
+				specializedLiteralLengths |= uint32(1) << transition.size
+			}
+		}
+		literalLimit := min(LONGESTLITERAL, inputSize-position)
+		for size := 1; size <= literalLimit; size++ {
+			destination := position + size
+			if specializedLiteralLengths&(uint32(1)<<size) != 0 {
+				continue
+			}
+			literal := LIT(position, size)
+			relax(position, destination, tokenCost(position, destination, literal.tokentype), literal)
+		}
+	}
+
+	if cost[inputSize] == unreachable {
+		return nil, 0, false
+	}
+
+	tokenCount := 0
+	for position := inputSize; position > 0; position = predecessor[position] {
+		if predecessor[position] < 0 {
+			return nil, 0, false
+		}
+		tokenCount++
+	}
+	tokens := make([]token, tokenCount)
+	for position, i := inputSize, tokenCount-1; position > 0; position, i = predecessor[position], i-1 {
+		tokens[i] = descriptor[position]
+	}
+	return tokens, cost[inputSize], true
+}
+
 const LONGESTRLE = 64
 const LONGESTLONGLZ = 64
 const LONGESTLZ = 32
 const LONGESTLITERAL = 31
 const MINRLE = 2
 const MINLZ = 3
+const MINLZOFFSET = 2
 const LZOFFSET = 256
 const LONGLZOFFSET = 32767
 const LZ2OFFSET = 94
@@ -234,71 +196,10 @@ func save_raw(f string, data []byte) {
 
 func fillPrefixArray(data []byte, ctx *crunchCtx) {
 	ctx.prefixArray = make(map[[MINLZ]byte][]int)
-	for i := 0; i < len(data)-MINLZ; i++ {
+	for i := 0; i+MINLZ <= len(data); i++ {
 		key := *(*[MINLZ]byte)(data[i:])
 		ctx.prefixArray[key] = append(ctx.prefixArray[key], i)
 	}
-}
-
-func findall(data []byte, prefix []byte, i int, minlz int, ctx *crunchCtx) <-chan int {
-	c := make(chan int)
-
-	// Full guard against short prefix or bad slice
-	if len(prefix) < MINLZ || len(data) == 0 || minlz < MINLZ || i >= len(data) {
-		close(c)
-		return c
-	}
-
-	x0 := max(0, i-LONGLZOFFSET)
-	x1 := min(i+minlz-1, len(data))
-
-	if ctx.usePrefixArray {
-		// FULL GUARD before accessing key
-		var key [MINLZ]byte
-		copy(key[:], prefix) // will zero-fill if prefix is too short
-		parray := ctx.prefixArray[key]
-
-		go func() {
-			if len(parray) == 0 {
-				close(c)
-				return
-			}
-			l := 0
-			h := len(parray) - 1
-			var mid int
-			for l < h {
-				mid = (h + l) >> 1
-				if parray[mid] < i {
-					l = mid + 1
-				} else if parray[mid] > i {
-					h = mid - 1
-				} else {
-					h = mid
-					l = mid
-				}
-			}
-			for o := mid; o >= 0 && o < len(parray) && parray[o] > x0; o-- {
-				if parray[o] < i && parray[o]+minlz <= len(data) && bytes.Equal(data[parray[o]:parray[o]+minlz], prefix) {
-					c <- parray[o]
-				}
-			}
-			close(c)
-		}()
-	} else {
-		go func() {
-			f := 1
-			for f >= 0 {
-				f = bytes.LastIndex(data[x0:x1], prefix)
-				if f >= 0 {
-					c <- f + x0
-					x1 = x0 + f + minlz - 1
-				}
-			}
-			close(c)
-		}()
-	}
-
-	return c
 }
 
 func findOptimalZeroRun(src []byte) int {
@@ -375,36 +276,67 @@ func tokenPayload(src []byte, t token) []byte {
 	}
 }
 
-func LZ(src []byte, i int, size int, offset int, minlz int, ctx *crunchCtx) token {
-	var lz token
-	lz.tokentype = LZID
-	lz.i = i
-	if i >= 0 {
-		bestpos := i - 1
-		bestlen := 0
-		if i+minlz <= len(src) {
-			prefixes := findall(src, src[i:i+minlz], i, minlz, ctx)
-			for j := range prefixes {
-				l := minlz
-				for i+l < len(src) && l < LONGESTLONGLZ && src[j+l] == src[i+l] {
-					l++
-				}
-				if (l > bestlen && (i-j < LZOFFSET || i-bestpos >= LZOFFSET || l > LONGESTLZ)) || (l > bestlen+1) {
-					bestpos = j
-					bestlen = l
-				}
+func makeLZ(i int, size int, offset int, tokenType byte) token {
+	return token{tokentype: tokenType, i: i, size: size, offset: offset}
+}
+
+func considerLZCandidate(src []byte, i, j, minlz int, candidates *lzCandidates) {
+	offset := i - j
+	if offset < MINLZOFFSET {
+		return
+	}
+	length := minlz
+	for i+length < len(src) && length < LONGESTLONGLZ && src[j+length] == src[i+length] {
+		length++
+	}
+	if offset < LZOFFSET {
+		shortLength := min(length, LONGESTLZ)
+		if shortLength > candidates.short.size ||
+			(shortLength == candidates.short.size && offset < candidates.short.offset) {
+			candidates.short = makeLZ(i, shortLength, offset, LZID)
+		}
+	}
+	if length > candidates.long.size ||
+		(length == candidates.long.size && offset < candidates.long.offset) {
+		candidates.long = makeLZ(i, length, offset, LONGLZID)
+	}
+}
+
+// findLZCandidates keeps the two cost classes independent. A nearby match is
+// eligible for the two-byte short token through length 32. Every valid offset,
+// including a nearby one, is also eligible for the three-byte long token
+// through length 64. Equal-length ties choose the nearest source explicitly.
+func findLZCandidates(src []byte, i int, minlz int, ctx *crunchCtx) lzCandidates {
+	candidates := lzCandidates{
+		short: makeLZ(i, 0, 0, LZID),
+		long:  makeLZ(i, 0, 0, LONGLZID),
+	}
+	if i < 0 || i+minlz > len(src) {
+		return candidates
+	}
+	prefix := src[i : i+minlz]
+	x0 := max(0, i-LONGLZOFFSET)
+	if ctx.usePrefixArray {
+		key := *(*[MINLZ]byte)(prefix)
+		parray := ctx.prefixArray[key]
+		for o := sort.SearchInts(parray, i) - 1; o >= 0 && parray[o] >= x0; o-- {
+			j := parray[o]
+			if j+minlz <= len(src) && bytes.Equal(src[j:j+minlz], prefix) {
+				considerLZCandidate(src, i, j, minlz, &candidates)
 			}
 		}
-		lz.size = bestlen
-		lz.offset = i - bestpos
 	} else {
-		lz.size = size
-		lz.offset = offset
+		x1 := min(i+minlz-1, len(src))
+		for {
+			found := bytes.LastIndex(src[x0:x1], prefix)
+			if found < 0 {
+				break
+			}
+			considerLZCandidate(src, i, x0+found, minlz, &candidates)
+			x1 = x0 + found + minlz - 1
+		}
 	}
-	if lz.size > LONGESTLZ || lz.offset >= LZOFFSET {
-		lz.tokentype = LONGLZID
-	}
-	return lz
+	return candidates
 }
 
 func RLE(src []byte, i int, size int, rlebyte byte) token {
@@ -449,7 +381,7 @@ func LZ2(src []byte, i int, size int, offset int) token {
 	lz2.size = -1
 	lz2.i = i
 	if i >= 0 {
-		if i+2 < len(src) {
+		if i+2 <= len(src) {
 			leftbound := max(0, i-LZ2OFFSET)
 			lpart := src[leftbound : i+1]
 			o := bytes.LastIndex(lpart, src[i:i+2])
@@ -478,18 +410,24 @@ func crunchAtByteWorker(src []byte, i int, ctx *crunchCtx) []tokenEntry {
 	entries := []tokenEntry{}
 	rle := RLE(src, i, 0, 0)
 	rlesize := min(rle.size, LONGESTRLE)
-	var lz, lz2 token
+	var lz lzCandidates
+	var lz2 token
 	if rlesize < LONGESTLONGLZ-1 {
-		lz = LZ(src, i, 0, 0, max(rlesize+1, MINLZ), ctx)
-	} else {
-		lz = LZ(src, -1, -1, -1, -1, ctx)
+		lz = findLZCandidates(src, i, max(rlesize+1, MINLZ), ctx)
 	}
-	if len(src)-i > 2 {
+	if len(src)-i >= 2 {
 		lz2 = LZ2(src, i, 0, 0)
 	}
 	zero := ZERORUN(src, i, ctx.optimalRun)
-	for size := lz.size; size >= MINLZ && size > rlesize; size-- {
-		tokenCopy := LZ(src, -1, size, lz.offset, MINLZ, ctx)
+	for size := lz.short.size; size >= MINLZ && size > rlesize; size-- {
+		tokenCopy := makeLZ(i, size, lz.short.offset, LZID)
+		entries = append(entries, tokenEntry{e: edge{i, i + size}, t: tokenCopy})
+	}
+	// A long edge ending where a short edge ends is strictly more expensive.
+	// Only expose long prefixes that reach a destination unavailable to short.
+	longMinimum := max(max(MINLZ, rlesize+1), lz.short.size+1)
+	for size := lz.long.size; size >= longMinimum; size-- {
+		tokenCopy := makeLZ(i, size, lz.long.offset, LONGLZID)
 		entries = append(entries, tokenEntry{e: edge{i, i + size}, t: tokenCopy})
 	}
 	if rle.size > LONGESTRLE {
@@ -505,7 +443,21 @@ func crunchAtByteWorker(src []byte, i int, ctx *crunchCtx) []tokenEntry {
 	if zero.size != 0 {
 		entries = append(entries, tokenEntry{e: edge{i, i + ctx.optimalRun}, t: zero})
 	}
-	return entries
+
+	// The old edge map retained the last token written for each destination.
+	// Compact the row in place with the same rule before storing it.
+	var slotByLength [257]uint16
+	compacted := entries[:0]
+	for _, entry := range entries {
+		size := entry.t.size
+		if slot := slotByLength[size]; slot != 0 {
+			compacted[int(slot)-1] = entry
+		} else {
+			slotByLength[size] = uint16(len(compacted) + 1)
+			compacted = append(compacted, entry)
+		}
+	}
+	return compacted
 }
 
 func crunch(src []byte, ctx *crunchCtx) []byte {
@@ -580,12 +532,6 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		0xC6,
 	}
 
-	// Create a graph with len(src)+1 vertices.
-	g := NewGraph(len(src) + 1)
-	for i := 0; i < len(src)+1; i++ {
-		g.AddVertex(i)
-	}
-
 	ctx.sourceLen = len(src)
 	ctx.sourceAbsLen = ctx.sourceLen
 
@@ -612,21 +558,10 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	}
 	tm := time.Now()
 
-	// --- Worker pool with collector goroutine ---
+	// Generate one deterministic candidate row per source position.
 	numWorkers := runtime.GOMAXPROCS(0)
 	jobs := make(chan int, numWorkers*2)
-	results := make(chan tokenEntry, numWorkers*4)
-
-	// Collector: merge results concurrently into tokenMap.
-	tokenMap := make(map[edge]token)
-	var collectorWg sync.WaitGroup
-	collectorWg.Add(1)
-	go func() {
-		defer collectorWg.Done()
-		for entry := range results {
-			tokenMap[entry.e] = entry.t
-		}
-	}()
+	rows := make([][]tokenEntry, len(src))
 
 	// Launch workers.
 	var wg sync.WaitGroup
@@ -635,10 +570,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				entries := crunchAtByteWorker(src, i, ctx)
-				for _, entry := range entries {
-					results <- entry
-				}
+				rows[i] = crunchAtByteWorker(src, i, ctx)
 			}
 		}()
 	}
@@ -649,27 +581,22 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	}
 	close(jobs)
 	wg.Wait()
-	close(results)
-	collectorWg.Wait()
 	// --- End worker pool ---
 
-	if !ctx.QUIET {
-		if ctx.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
-		}
-		fmt.Print("Closing Gaps")
+	starts := make([]int, len(src)+1)
+	transitionCount := 0
+	for position, row := range rows {
+		starts[position] = transitionCount
+		transitionCount += len(row)
 	}
-	// Fill gaps with literal tokens.
-	for i := 0; i < len(src); i++ {
-		for j := 1; j < min(LONGESTLITERAL+1, len(src)+1-i); j++ {
-			key := edge{i, i + j}
-			if _, exists := tokenMap[key]; !exists {
-				tokenMap[key] = LIT(i, j)
-			}
+	starts[len(src)] = transitionCount
+	transitions := make([]token, 0, transitionCount)
+	for _, row := range rows {
+		for _, entry := range row {
+			transitions = append(transitions, entry.t)
 		}
 	}
+	rows = nil
 
 	if !ctx.QUIET {
 		if ctx.STATS {
@@ -677,23 +604,10 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 		} else {
 			fmt.Println()
 		}
-		fmt.Print("Populating Graph")
+		fmt.Print("Computing optimal parse")
 	}
 	tm = time.Now()
-	for k, t := range tokenMap {
-		g.AddArc(k.n0, k.n1, tokenCost(k.n0, k.n1, t.tokentype))
-	}
-
-	if !ctx.QUIET {
-		if ctx.STATS {
-			fmt.Println(" ...", time.Since(tm))
-		} else {
-			fmt.Println()
-		}
-		fmt.Print("Computing shortest path")
-	}
-	tm = time.Now()
-	bestPath, _, found := g.Shortest(0, len(src))
+	token_list, _, found := shortestPathForward(transitions, starts, len(src))
 	if !found {
 		fmt.Println("No valid path found")
 		os.Exit(1)
@@ -707,11 +621,6 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 	}
 
 	crunched := make([]byte, 0)
-	token_list := make([]token, 0)
-	for i := 0; i < len(bestPath)-1; i++ {
-		e := edge{bestPath[i], bestPath[i+1]}
-		token_list = append(token_list, tokenMap[e])
-	}
 
 	if ctx.INPLACE {
 		safety := len(token_list)
@@ -800,7 +709,7 @@ func crunch(src []byte, ctx *crunchCtx) []byte {
 }
 
 func usage() {
-	fmt.Println("TSCrunch 1.3.1 - binary cruncher, by Antonio Savona")
+	fmt.Println("TSCrunch 1.3.2 - binary cruncher, by Antonio Savona")
 	fmt.Println("Usage: tscrunch [-p] [-i] [-q] [-x[2] $addr] infile outfile")
 	fmt.Println(" -p  : input file is a prg, first 2 bytes are discarded.")
 	fmt.Println(" -x  $addr: creates a self extracting file (forces -p)")

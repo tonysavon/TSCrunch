@@ -9,8 +9,8 @@
 #include "boot_code.h"
 
 /*
- * TSCrunch v1.3.1 - C99 encoder
- * Drop-in CLI compatible with tscrunch.py/tscrunch.go
+ * TSCrunch v1.3.2 - C99 encoder
+ * Drop-in CLI compatible with tscrunch.go
  */
 
 #define LONGESTRLE      64
@@ -19,6 +19,7 @@
 #define LONGESTLITERAL  31
 #define MINRLE          2
 #define MINLZ           3
+#define MINLZOFFSET     2
 #define LZOFFSET        256
 #define LONGLZOFFSET    32767
 #define LZ2OFFSET       94
@@ -48,6 +49,11 @@ typedef struct {
 } Token;
 
 typedef struct {
+    Token short_match;
+    Token long_match;
+} LZCandidates;
+
+typedef struct {
     int dest;
     int64_t cost;
     Token token;
@@ -58,17 +64,6 @@ typedef struct {
     int count;
     int cap;
 } EdgeList;
-
-typedef struct {
-    int vertex;
-    int64_t dist;
-} PQItem;
-
-typedef struct {
-    PQItem *items;
-    int size;
-    int cap;
-} PriorityQueue;
 
 typedef struct {
     bool quiet;
@@ -85,7 +80,7 @@ static int min_int(int a, int b) { return a < b ? a : b; }
 static int max_int(int a, int b) { return a > b ? a : b; }
 
 static void usage(void) {
-    printf("TSCrunch 1.3.1 - binary cruncher, by Antonio Savona\n");
+    printf("TSCrunch 1.3.2 - binary cruncher, by Antonio Savona\n");
     printf("Usage: tscrunch [-p] [-i] [-r] [-q] [-x[2] $addr] [--selfcheck] infile outfile\n");
     printf(" -p  : input file is a prg, first 2 bytes are discarded\n");
     printf(" -x  $addr: creates a self extracting file (forces -p)\n");
@@ -93,7 +88,7 @@ static void usage(void) {
     printf(" -b  : blanks screen during decrunching (only with -x)\n");
     printf(" -i  : inplace crunching (forces -p)\n");
     printf(" -q  : quiet mode\n");
-    printf(" --selfcheck: compare output sizes against python/go encoders\n");
+    printf(" --selfcheck: compare output size against the Go encoder\n");
 }
 
 static uint8_t *load_file(const char *path, size_t *out_len) {
@@ -158,79 +153,6 @@ static long file_size(const char *path) {
     long sz = ftell(f);
     fclose(f);
     return sz;
-}
-
-static void pq_init(PriorityQueue *pq, int cap) {
-    pq->size = 0;
-    pq->cap = cap > 0 ? cap : 16;
-    pq->items = (PQItem *)malloc((size_t)pq->cap * sizeof(PQItem));
-}
-
-static void pq_free(PriorityQueue *pq) {
-    free(pq->items);
-    pq->items = NULL;
-    pq->size = 0;
-    pq->cap = 0;
-}
-
-static void pq_swap(PQItem *a, PQItem *b) {
-    PQItem tmp = *a;
-    *a = *b;
-    *b = tmp;
-}
-
-static void pq_push(PriorityQueue *pq, int vertex, int64_t dist) {
-    if (pq->size >= pq->cap) {
-        int new_cap = pq->cap * 2;
-        PQItem *new_items = (PQItem *)realloc(pq->items, (size_t)new_cap * sizeof(PQItem));
-        if (!new_items) {
-            return;
-        }
-        pq->items = new_items;
-        pq->cap = new_cap;
-    }
-
-    int idx = pq->size++;
-    pq->items[idx].vertex = vertex;
-    pq->items[idx].dist = dist;
-
-    while (idx > 0) {
-        int parent = (idx - 1) / 2;
-        if (pq->items[parent].dist <= pq->items[idx].dist) {
-            break;
-        }
-        pq_swap(&pq->items[parent], &pq->items[idx]);
-        idx = parent;
-    }
-}
-
-static bool pq_pop(PriorityQueue *pq, PQItem *out) {
-    if (pq->size == 0) {
-        return false;
-    }
-    *out = pq->items[0];
-    pq->size--;
-    if (pq->size > 0) {
-        pq->items[0] = pq->items[pq->size];
-        int idx = 0;
-        while (1) {
-            int left = idx * 2 + 1;
-            int right = idx * 2 + 2;
-            int smallest = idx;
-            if (left < pq->size && pq->items[left].dist < pq->items[smallest].dist) {
-                smallest = left;
-            }
-            if (right < pq->size && pq->items[right].dist < pq->items[smallest].dist) {
-                smallest = right;
-            }
-            if (smallest == idx) {
-                break;
-            }
-            pq_swap(&pq->items[idx], &pq->items[smallest]);
-            idx = smallest;
-        }
-    }
-    return true;
 }
 
 static void edge_list_add(EdgeList *list, Edge edge) {
@@ -301,7 +223,7 @@ static int rle_length(const uint8_t *src, int len, int pos) {
 }
 
 static int lz2_offset(const uint8_t *src, int len, int pos) {
-    if (pos + LZ2SIZE >= len) {
+    if (pos + LZ2SIZE > len) {
         return -1;
     }
     int start = pos - LZ2OFFSET;
@@ -316,48 +238,122 @@ static int lz2_offset(const uint8_t *src, int len, int pos) {
     return -1;
 }
 
-static Token lz_best(const uint8_t *src, int len, int pos, int minlz) {
+static Token make_lz(int pos, int size, int offset) {
     Token t;
     t.type = TOKEN_LZ;
     t.pos = pos;
-    t.size = 0;
-    t.offset = 0;
+    t.size = size;
+    t.offset = offset;
     t.rlebyte = 0;
+    return t;
+}
 
-    if (len - pos < minlz) {
-        return t;
+/* For every position, store the nearest earlier position with the same
+ * three-byte prefix. Building the chains is linear and match enumeration then
+ * visits only genuine prefix occurrences inside the LZ window. */
+static int *build_prefix_previous(const uint8_t *src, int len) {
+    int *previous = (int *)malloc((size_t)len * sizeof(int));
+    if (!previous) {
+        return NULL;
+    }
+    for (int i = 0; i < len; i++) {
+        previous[i] = -1;
+    }
+    if (len < MINLZ) {
+        return previous;
     }
 
-    int bestpos = pos - 1;
-    int bestlen = 0;
+    int capacity = 16;
+    while (capacity < (len - MINLZ + 1) * 2) {
+        capacity <<= 1;
+    }
+    uint32_t *keys = (uint32_t *)malloc((size_t)capacity * sizeof(uint32_t));
+    int *heads = (int *)malloc((size_t)capacity * sizeof(int));
+    if (!keys || !heads) {
+        free(keys);
+        free(heads);
+        free(previous);
+        return NULL;
+    }
+    for (int i = 0; i < capacity; i++) {
+        keys[i] = UINT32_MAX;
+        heads[i] = -1;
+    }
+
+    for (int i = 0; i + MINLZ <= len; i++) {
+        uint32_t key = ((uint32_t)src[i] << 16) |
+                       ((uint32_t)src[i + 1] << 8) |
+                       (uint32_t)src[i + 2];
+        uint32_t slot = (key * UINT32_C(2654435761)) & (uint32_t)(capacity - 1);
+        while (keys[slot] != UINT32_MAX && keys[slot] != key) {
+            slot = (slot + 1) & (uint32_t)(capacity - 1);
+        }
+        if (keys[slot] == UINT32_MAX) {
+            keys[slot] = key;
+        }
+        previous[i] = heads[slot];
+        heads[slot] = i;
+    }
+
+    free(keys);
+    free(heads);
+    return previous;
+}
+
+/* Keep the two encoded cost classes independent. A nearby match can use the
+ * two-byte token through length 32, while every valid offset can use the
+ * three-byte token through length 64. Equal-length ties choose the nearest
+ * source explicitly. */
+static LZCandidates find_lz_candidates(const uint8_t *src, int len, int pos, int minlz,
+                                       const int *prefix_previous) {
+    LZCandidates candidates;
+    candidates.short_match = make_lz(pos, 0, 0);
+    candidates.long_match = make_lz(pos, 0, 0);
+
+    if (len - pos < minlz) {
+        return candidates;
+    }
+
     int x0 = pos - LONGLZOFFSET;
     if (x0 < 0) {
         x0 = 0;
     }
 
-    for (int j = pos - 1; j >= x0; j--) {
+    int j = prefix_previous ? prefix_previous[pos] : pos - 1;
+    while (j >= x0) {
         if (memcmp(src + j, src + pos, (size_t)minlz) == 0) {
+            int offset = pos - j;
+            if (offset < MINLZOFFSET) {
+                continue;
+            }
             int l = minlz;
             while (pos + l < len && l < LONGESTLONGLZ && src[j + l] == src[pos + l]) {
                 l++;
             }
-            if ((l > bestlen && (pos - j < LZOFFSET || pos - bestpos >= LZOFFSET || l > LONGESTLZ)) || (l > bestlen + 1)) {
-                bestpos = j;
-                bestlen = l;
+
+            if (offset < LZOFFSET) {
+                int short_length = min_int(l, LONGESTLZ);
+                if (short_length > candidates.short_match.size ||
+                    (short_length == candidates.short_match.size && offset < candidates.short_match.offset)) {
+                    candidates.short_match = make_lz(pos, short_length, offset);
+                }
+            }
+
+            if (l > candidates.long_match.size ||
+                (l == candidates.long_match.size && offset < candidates.long_match.offset)) {
+                candidates.long_match = make_lz(pos, l, offset);
             }
         }
+        j = prefix_previous ? prefix_previous[j] : j - 1;
     }
-
-    t.size = bestlen;
-    t.offset = pos - bestpos;
-    return t;
+    return candidates;
 }
 
 static bool zerorun_at(const uint8_t *src, int len, int pos, int run) {
     if (run <= 0) {
         return false;
     }
-    if (pos + run >= len) {
+    if (pos + run > len) {
         return false;
     }
     for (int i = 0; i < run; i++) {
@@ -519,14 +515,17 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
 
     *optimal_run = find_optimal_zero(work_src, work_len);
 
-    EdgeList *graph = (EdgeList *)calloc((size_t)(work_len + 1), sizeof(EdgeList));
-    if (!graph) {
+    int *starts = (int *)malloc((size_t)(work_len + 1) * sizeof(int));
+    if (!starts) {
         return NULL;
     }
+    EdgeList transitions = {0};
+    int *prefix_previous = build_prefix_previous(work_src, work_len);
 
     const int max_token_size = 256;
 
     for (int i = 0; i < work_len; i++) {
+        starts[i] = transitions.count;
         bool present[257];
         Token tokens[257];
         int max_size = 0;
@@ -536,26 +535,33 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
         int rle_size = rle_length(work_src, work_len, i);
         int rle_cap = min_int(rle_size, LONGESTRLE);
 
-        Token lz = {0};
+        LZCandidates lz;
+        lz.short_match = make_lz(i, 0, 0);
+        lz.long_match = make_lz(i, 0, 0);
         if (rle_cap < LONGESTLONGLZ - 1) {
             int minlz = max_int(rle_cap + 1, MINLZ);
-            lz = lz_best(work_src, work_len, i, minlz);
-        } else {
-            lz.type = TOKEN_LZ;
-            lz.pos = i;
-            lz.size = 1;
-            lz.offset = 0;
+            lz = find_lz_candidates(work_src, work_len, i, minlz, prefix_previous);
         }
 
-        while (lz.size >= MINLZ && lz.size > rle_cap) {
-            Token t = lz;
-            t.size = lz.size;
+        for (int size = lz.short_match.size; size >= MINLZ && size > rle_cap; size--) {
+            Token t = make_lz(i, size, lz.short_match.offset);
             tokens[t.size] = t;
             present[t.size] = true;
             if (t.size > max_size) {
                 max_size = t.size;
             }
-            lz.size -= 1;
+        }
+
+        /* Long edges that end where a short edge ends are strictly more
+         * expensive, so only expose destinations unavailable to short. */
+        int long_minimum = max_int(max_int(MINLZ, rle_cap + 1), lz.short_match.size + 1);
+        for (int size = lz.long_match.size; size >= long_minimum; size--) {
+            Token t = make_lz(i, size, lz.long_match.offset);
+            tokens[t.size] = t;
+            present[t.size] = true;
+            if (t.size > max_size) {
+                max_size = t.size;
+            }
         }
 
         if (rle_size > LONGESTRLE) {
@@ -617,23 +623,6 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
             }
         }
 
-        int lit_max = min_int(LONGESTLITERAL, work_len - i);
-        for (int size = 1; size <= lit_max; size++) {
-            if (!present[size]) {
-                Token t;
-                t.type = TOKEN_LITERAL;
-                t.pos = i;
-                t.size = size;
-                t.offset = 0;
-                t.rlebyte = 0;
-                present[size] = true;
-                tokens[size] = t;
-                if (size > max_size) {
-                    max_size = size;
-                }
-            }
-        }
-
         for (int size = 1; size <= max_size; size++) {
             if (!present[size]) {
                 continue;
@@ -646,9 +635,11 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
             e.dest = i + size;
             e.token = t;
             e.cost = token_cost(&t);
-            edge_list_add(&graph[i], e);
+            edge_list_add(&transitions, e);
         }
     }
+    starts[work_len] = transitions.count;
+    free(prefix_previous);
 
     int n = work_len;
     int64_t *dist = (int64_t *)malloc((size_t)(n + 1) * sizeof(int64_t));
@@ -659,10 +650,8 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
         free(dist);
         free(prev);
         free(prev_token);
-        for (int i = 0; i <= n; i++) {
-            free(graph[i].edges);
-        }
-        free(graph);
+        free(transitions.edges);
+        free(starts);
         return NULL;
     }
 
@@ -672,39 +661,60 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
     }
     dist[0] = 0;
 
-    PriorityQueue pq;
-    pq_init(&pq, n + 1);
-    pq_push(&pq, 0, 0);
-
-    PQItem item;
-    while (pq_pop(&pq, &item)) {
-        int u = item.vertex;
-        if (item.dist != dist[u]) {
+    /* Every transition moves forward, so input positions are already a
+     * topological order. Generate missing literal edges on demand rather than
+     * storing them in the candidate graph. */
+    for (int u = 0; u < n; u++) {
+        if (dist[u] == INT64_MAX / 4) {
             continue;
         }
-        if (u == n) {
-            break;
-        }
-        for (int ei = 0; ei < graph[u].count; ei++) {
-            Edge *edge = &graph[u].edges[ei];
+        uint32_t specialized_literal_lengths = 0;
+        for (int ei = starts[u]; ei < starts[u + 1]; ei++) {
+            Edge *edge = &transitions.edges[ei];
             int v = edge->dest;
             int64_t alt = dist[u] + edge->cost;
-            if (alt < dist[v]) {
+            bool better = alt < dist[v];
+            if (alt == dist[v] && prev[v] >= 0) {
+                better = dist[u] < dist[prev[v]];
+            }
+            if (better) {
                 dist[v] = alt;
                 prev[v] = u;
                 prev_token[v] = edge->token;
-                pq_push(&pq, v, alt);
+            }
+            if (edge->token.size <= LONGESTLITERAL) {
+                specialized_literal_lengths |= UINT32_C(1) << edge->token.size;
+            }
+        }
+
+        int literal_max = min_int(LONGESTLITERAL, n - u);
+        for (int size = 1; size <= literal_max; size++) {
+            if ((specialized_literal_lengths & (UINT32_C(1) << size)) != 0) {
+                continue;
+            }
+            Token literal;
+            literal.type = TOKEN_LITERAL;
+            literal.pos = u;
+            literal.size = size;
+            literal.offset = 0;
+            literal.rlebyte = 0;
+            int v = u + size;
+            int64_t alt = dist[u] + token_cost(&literal);
+            bool better = alt < dist[v];
+            if (alt == dist[v] && prev[v] >= 0) {
+                better = dist[u] < dist[prev[v]];
+            }
+            if (better) {
+                dist[v] = alt;
+                prev[v] = u;
+                prev_token[v] = literal;
             }
         }
     }
 
-    pq_free(&pq);
-
     if (prev[n] < 0) {
-        for (int i = 0; i <= n; i++) {
-            free(graph[i].edges);
-        }
-        free(graph);
+        free(transitions.edges);
+        free(starts);
         free(dist);
         free(prev);
         free(prev_token);
@@ -718,10 +728,8 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
 
     Token *token_list = (Token *)malloc((size_t)token_count * sizeof(Token));
     if (!token_list) {
-        for (int i = 0; i <= n; i++) {
-            free(graph[i].edges);
-        }
-        free(graph);
+        free(transitions.edges);
+        free(starts);
         free(dist);
         free(prev);
         free(prev_token);
@@ -761,10 +769,8 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
             remainder = (uint8_t *)malloc((size_t)remainder_len);
             if (!remainder) {
                 free(token_list);
-                for (int i = 0; i <= n; i++) {
-                    free(graph[i].edges);
-                }
-                free(graph);
+                free(transitions.edges);
+                free(starts);
                 free(dist);
                 free(prev);
                 free(prev_token);
@@ -776,10 +782,8 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
             remainder = (uint8_t *)malloc(1);
             if (!remainder) {
                 free(token_list);
-                for (int i = 0; i <= n; i++) {
-                    free(graph[i].edges);
-                }
-                free(graph);
+                free(transitions.edges);
+                free(starts);
                 free(dist);
                 free(prev);
                 free(prev_token);
@@ -819,10 +823,8 @@ static uint8_t *crunch(const uint8_t *src, int len, const Options *opt, const ui
         append_byte(&out, &out_len_local, &out_cap, (uint8_t)TERMINATOR);
     }
 
-    for (int i = 0; i <= n; i++) {
-        free(graph[i].edges);
-    }
-    free(graph);
+    free(transitions.edges);
+    free(starts);
     free(dist);
     free(prev);
     free(prev_token);
@@ -1046,18 +1048,11 @@ int main(int argc, char **argv) {
     }
 
     if (opt.selfcheck) {
-        char out_py[1024];
         char out_go[1024];
         char flags[256];
         char cmd[2048];
         int used = 0;
 
-        if (snprintf(out_py, sizeof(out_py), "%s.py", out_path) >= (int)sizeof(out_py)) {
-            fprintf(stderr, "Selfcheck: output path too long\n");
-            free(crunched);
-            free(src);
-            return 1;
-        }
         if (snprintf(out_go, sizeof(out_go), "%s.go", out_path) >= (int)sizeof(out_go)) {
             fprintf(stderr, "Selfcheck: output path too long\n");
             free(crunched);
@@ -1095,19 +1090,14 @@ int main(int argc, char **argv) {
             strncat(flags, jmp_arg, sizeof(flags) - strlen(flags) - 1);
         }
 
-        snprintf(cmd, sizeof(cmd), "python tscrunch.py %s \"%s\" \"%s\"", flags, in_path, out_py);
-        if (system(cmd) != 0) {
-            fprintf(stderr, "Selfcheck: python encoder failed\n");
-        }
         snprintf(cmd, sizeof(cmd), "go run tscrunch.go %s \"%s\" \"%s\"", flags, in_path, out_go);
         if (system(cmd) != 0) {
             fprintf(stderr, "Selfcheck: go encoder failed\n");
         }
 
         long sz_c = file_size(out_path);
-        long sz_py = file_size(out_py);
         long sz_go = file_size(out_go);
-        printf("Selfcheck sizes (bytes): C=%ld Python=%ld Go=%ld\n", sz_c, sz_py, sz_go);
+        printf("Selfcheck sizes (bytes): C=%ld Go=%ld\n", sz_c, sz_go);
     }
 
     free(crunched);
