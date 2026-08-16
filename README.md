@@ -66,7 +66,10 @@ On Linux and other Unix-like systems, link the math library and omit the `.exe` 
 Building the Go encoder
 =======================
 
+	# Go 1.13 or newer
 	go build -o tscrunch tscrunch.go
+
+Build `tscrunch.go` explicitly as shown above. Running `go build .` in the repository root also includes `tscrunch.c`, which requires cgo and is not needed for the Go encoder.
 
 Building the Java encoder
 =========================

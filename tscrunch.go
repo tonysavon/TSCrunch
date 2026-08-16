@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"os"
 	"runtime"
@@ -110,13 +111,13 @@ func shortestPathForward(transitions []token, starts []int, inputSize int) ([]to
 			destination := position + transition.size
 			relax(position, destination, tokenCost(position, destination, transition.tokentype), transition)
 			if transition.size <= LONGESTLITERAL {
-				specializedLiteralLengths |= uint32(1) << transition.size
+				specializedLiteralLengths |= uint32(1) << uint(transition.size)
 			}
 		}
 		literalLimit := min(LONGESTLITERAL, inputSize-position)
 		for size := 1; size <= literalLimit; size++ {
 			destination := position + size
-			if specializedLiteralLengths&(uint32(1)<<size) != 0 {
+			if specializedLiteralLengths&(uint32(1)<<uint(size)) != 0 {
 				continue
 			}
 			literal := LIT(position, size)
@@ -182,7 +183,7 @@ func max(x, y int) int {
 }
 
 func load_raw(f string) []byte {
-	data, err := os.ReadFile(f)
+	data, err := ioutil.ReadFile(f)
 	if err == nil {
 		return data
 	}
@@ -191,13 +192,14 @@ func load_raw(f string) []byte {
 }
 
 func save_raw(f string, data []byte) {
-	os.WriteFile(f, data, 0666)
+	ioutil.WriteFile(f, data, 0666)
 }
 
 func fillPrefixArray(data []byte, ctx *crunchCtx) {
 	ctx.prefixArray = make(map[[MINLZ]byte][]int)
 	for i := 0; i+MINLZ <= len(data); i++ {
-		key := *(*[MINLZ]byte)(data[i:])
+		var key [MINLZ]byte
+		copy(key[:], data[i:i+MINLZ])
 		ctx.prefixArray[key] = append(ctx.prefixArray[key], i)
 	}
 }
@@ -317,7 +319,8 @@ func findLZCandidates(src []byte, i int, minlz int, ctx *crunchCtx) lzCandidates
 	prefix := src[i : i+minlz]
 	x0 := max(0, i-LONGLZOFFSET)
 	if ctx.usePrefixArray {
-		key := *(*[MINLZ]byte)(prefix)
+		var key [MINLZ]byte
+		copy(key[:], prefix)
 		parray := ctx.prefixArray[key]
 		for o := sort.SearchInts(parray, i) - 1; o >= 0 && parray[o] >= x0; o-- {
 			j := parray[o]
