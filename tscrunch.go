@@ -237,21 +237,23 @@ func findOptimalZeroRun(src []byte) int {
 }
 
 func tokenCost(n0, n1 int, t byte) int64 {
+	// Packed bytes dominate; ties use twice the estimated extreme-decoder
+	// cycles. Length parity is included, page crossings are not modeled.
 	size := int64(n1 - n0)
-	mdiv := int64(LONGESTLITERAL * (1 << 16))
+	mdiv := int64(1) << 32
 	switch t {
 	case LZID:
-		return mdiv*2 + 134 - size
+		return mdiv*2 + 156 + 31*size - 7*(size&1)
 	case LONGLZID:
-		return mdiv*3 + 138 - size
+		return mdiv*3 + 196 + 31*size - 7*(size&1)
 	case RLEID:
-		return mdiv*2 + 128 - size
+		return mdiv*2 + 112 + 19*size - (size & 1)
 	case ZERORUNID:
-		return mdiv * 1
+		return mdiv + 112 + 19*size
 	case LZ2ID:
-		return mdiv*1 + 132 - size
+		return mdiv + 148
 	case LITERALID:
-		return mdiv*(size+1) + 130 - size
+		return mdiv*(size+1) + 78 + 29*size + 5*(size&1)
 	default:
 		os.Exit(-1)
 	}

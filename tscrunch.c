@@ -369,23 +369,25 @@ static bool lz_is_long(const Token *t) {
 }
 
 static int64_t token_cost(const Token *t) {
-    const int64_t mdiv = (int64_t)LONGESTLITERAL * 65536;
+    /* Packed bytes dominate; ties use twice the estimated extreme-decoder
+     * cycles. Length parity is included, page crossings are not modeled. */
+    const int64_t mdiv = INT64_C(1) << 32;
     int64_t size = (int64_t)t->size;
 
     switch (t->type) {
         case TOKEN_LZ:
             if (lz_is_long(t)) {
-                return mdiv * 3 + 138 - size;
+                return mdiv * 3 + 196 + 31 * size - 7 * (size & 1);
             }
-            return mdiv * 2 + 134 - size;
+            return mdiv * 2 + 156 + 31 * size - 7 * (size & 1);
         case TOKEN_RLE:
-            return mdiv * 2 + 128 - size;
+            return mdiv * 2 + 112 + 19 * size - (size & 1);
         case TOKEN_ZERORUN:
-            return mdiv * 1;
+            return mdiv + 112 + 19 * size;
         case TOKEN_LZ2:
-            return mdiv * 1 + 132 - size;
+            return mdiv + 148;
         case TOKEN_LITERAL:
-            return mdiv * (size + 1) + 130 - size;
+            return mdiv * (size + 1) + 78 + 29 * size + 5 * (size & 1);
         default:
             return mdiv * 10;
     }

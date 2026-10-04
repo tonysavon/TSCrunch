@@ -143,6 +143,22 @@ decruncher.asm is the recommended decruncher for the general case, but other tha
 Performance
 ===========
 
+The six-game KabutoCrunch cycle benchmark has been ported to this repository:
+
+    python tools/benchmark_cycles.py --json benchmarks/cycle-aware.json --csv benchmarks/cycle-aware.csv
+
+It uses the same original games from the sibling working folders, builds the C
+encoder, assembles all three memory decoders, and verifies the output under a
+6502 emulator. Requirements are GCC, Java, KickAssembler, and the Python `py65`
+package. All six default games must be present; individual PRG paths can also be
+passed on the command line.
+
+The C, Go, and Java parsers use estimated 6502 cycles to select between parses
+with the same packed size. The stream format and decoders are unchanged. On the
+six games, packed size stays at 150,888 bytes and the extreme decoder improves
+from 5,550,884 to 5,523,956 cycles (0.49%). See
+[cycle-aware parsing](docs/cycle-aware-parsing.md) for the model and validation.
+
 TSCrunch is designed for ultra-fast decrunching while keeping a decent compression ratio. Being a byte-cruncher, it falls short of popular bit-crunchers, such as exomizer or B2, when comparing compression efficiency, but it is usually much faster at decoding. Furthermore, you can expect a 20% to 40% speed bump compared to popular byte-crunchers with similar compression efficiency.
 The following benchmark compares TSCrunch performance with those of a fast byte-cruncher, TinyCrunch, and a two fast bit-crunchers, B2 and dali, on a real-case compression scenario: Chopper Command, from the same author.
 
